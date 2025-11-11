@@ -188,24 +188,6 @@ function rgbToHex(r, g, b) {
   return `#${hex(to255(r))}${hex(to255(g))}${hex(to255(b))}`;
 }
 
-function findSolidPaint(node) {
-  if (!node) return null;
-
-  if (Array.isArray(node.fills)) {
-    for (const fill of node.fills) {
-      if (fill?.type === "SOLID" && fill?.visible !== false && fill?.color) {
-        return fill;
-      }
-    }
-  }
-
-  if (node.backgroundColor) {
-    return { type: "SOLID", color: node.backgroundColor };
-  }
-
-  return null;
-}
-
 function formatLineHeight(style) {
   if (!style) return "normal";
 
@@ -363,8 +345,48 @@ async function fetchNodeTreeWithReferences(fileId, nodeId) {
   return { rootNode, referenceNodes };
 }
 
+function extractSolidPaints(node) {
+  const paints = [];
+
+  if (!node) {
+    return paints;
+  }
+
+  const pushPaint = (paint, source) => {
+    if (!paint) return;
+    if (paint.type !== "SOLID") return;
+    if (paint.visible === false) return;
+    if (!paint.color) return;
+    paints.push({ paint, source });
+  };
+
+  if (Array.isArray(node.fills)) {
+    for (const fill of node.fills) {
+      pushPaint(fill, "fill");
+    }
+  }
+
+  if (Array.isArray(node.strokes)) {
+    for (const stroke of node.strokes) {
+      pushPaint(stroke, "stroke");
+    }
+  }
+
+  if (Array.isArray(node.backgrounds)) {
+    for (const background of node.backgrounds) {
+      pushPaint(background, "background");
+    }
+  }
+
+  if (node.backgroundColor) {
+    paints.push({ paint: { type: "SOLID", color: node.backgroundColor }, source: "background" });
+  }
+
+  return paints;
+}
+
 function collectTokens(node, path, state, context) {
-  if (!node || node.visible === false) {
+  if (!node) {
     return;
   }
 
@@ -376,15 +398,26 @@ function collectTokens(node, path, state, context) {
   const inTypographySection =
     context.inTypographySection || TYPOGRAPHY_SECTION_NAMES.has(lowerName);
 
-  const fill = findSolidPaint(node);
-  if (fill?.color && node.type !== "TEXT") {
-    const colorValue = formatColor(fill);
-    if (colorValue) {
-      const segments = getMeaningfulSegments(currentPath);
+  if (node.type !== "TEXT") {
+    const paints = extractSolidPaints(node);
+    for (const { paint, source } of paints) {
+      const colorValue = formatColor(paint);
+      if (!colorValue) {
+        continue;
+      }
+
+      const signature = `${colorValue}|${source}|${currentPath.join("/")}`;
+      if (state.colorSignatures.has(signature)) {
+        continue;
+      }
+
+      const pathForName = source === "fill" ? currentPath : [...currentPath, source];
+      const segments = getMeaningfulSegments(pathForName);
       const fallback = segments.length === 0 ? `color-${++state.colorFallbackCount}` : "";
-      const tokenName = buildTokenName(currentPath, state.usedColorNames, fallback);
+      const tokenName = buildTokenName(pathForName, state.usedColorNames, fallback);
 
       if (tokenName) {
+        state.colorSignatures.add(signature);
         state.colors.push({ name: tokenName, value: colorValue });
       }
     }
@@ -459,6 +492,7 @@ async function generateScss(projectName, fileId, nodeId) {
     usedColorNames: new Set(),
     usedFontNames: new Set(),
     colorFallbackCount: 0,
+    colorSignatures: new Set(),
     fontBySignature: new Map(),
   };
 
