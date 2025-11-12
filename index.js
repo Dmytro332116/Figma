@@ -1,10 +1,11 @@
-// index.js v5.0 — Figma → SCSS + Icons + Fonts + ZIP
+// index.js v5.1 — Figma → SCSS + Icons + Fonts + ZIP
 // --------------------------------------------------
 // ✅ Меню дій (SCSS / Fonts / Icons / All)
 // ✅ Оновлює тільки існуючі змінні в SCSS (кольори / текст / тіні)
 // ✅ Експорт іконок (SVG → PNG fallback) з прогресом
-// ✅ Завантаження шрифтів через Google Fonts каталóg (woff2)
+// ✅ Завантаження шрифтів через Webfonts Helper API (woff2)
 // ✅ Розкладання шрифтів по папках Regular / Bold / Black / …
+// ✅ Імена файлів: Rubik-Bold.woff2, Cuprum-Regular.woff2, ...
 // ✅ Архів dist/export_Figma.zip після кожної дії
 // ✅ Лог-таблиця для іконок, акуратні кольори логів
 
@@ -30,6 +31,26 @@ const FIGMA_HEADERS = { "X-Figma-Token": FIGMA_TOKEN };
 const ensureDir = (p) => fs.mkdirSync(p, { recursive: true });
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
+async function fetchWithRetry(url, options = {}, attempts = 3, delayMs = 300) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      return res;
+    } catch (err) {
+      lastError = err;
+      if (attempt < attempts) {
+        await sleep(delayMs * attempt);
+        continue;
+      }
+    }
+  }
+  throw lastError;
+}
+
 const slug = (s = "") =>
   s
     .toString()
@@ -43,6 +64,7 @@ const slug = (s = "") =>
 
 const to255 = (x) => Math.round((x ?? 0) * 255);
 const hex2 = (v) => v.toString(16).padStart(2, "0");
+
 const rgbaOrHex = (color, alphaOverride) => {
   if (!color) return null;
   const a =
@@ -58,6 +80,7 @@ const rgbaOrHex = (color, alphaOverride) => {
     ? `rgba(${r}, ${g}, ${b}, ${Number(a.toFixed(3))})`
     : `#${hex2(r)}${hex2(g)}${hex2(b)}`;
 };
+
 const px = (n) => `${Math.round(n || 0)}px`;
 const wrapRem = (pxVal, isDesktop) =>
   isDesktop ? `#{remD(${pxVal})}` : `#{rem(${pxVal})}`;
@@ -94,25 +117,6 @@ async function fetchFrame(fileId, nodeId) {
 }
 
 // ---------- FRAME TRAVERSE ----------
-const TECH_NAMES = new Set([
-  "rectangle",
-  "rect",
-  "path",
-  "frame",
-  "group",
-  "union",
-  "mask",
-  "layer",
-  "instance",
-  "component",
-  "subtract",
-  "arrow",
-  "icon",
-  "background",
-  "bg",
-  "vector",
-]);
-
 const ICON_NAME_RE =
   /icon|icn|glyph|logo|arrow|chevron|close|burger|menu|play|pause|cart|search|user|heart|plus|minus|star/i;
 const ICON_TYPES = new Set([
@@ -421,68 +425,31 @@ function printIconTable(rows) {
   console.log(`Разом: ${rows.length} (успішно ${ok})`);
 }
 
-// ---------- GOOGLE FONTS CATALOG ----------
+// ---------- WEBFONTS HELPER (FONTS) ----------
 const BROWSER_HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
   Accept: "text/css,*/*;q=0.1",
 };
 
-async function fetchGoogleCatalog() {
-  const url = "https://fonts.google.com/metadata/fonts";
-  const res = await fetch(url, { headers: BROWSER_HEADERS });
-  if (!res.ok) throw new Error(`Google Fonts metadata HTTP ${res.status}`);
-  let text = await res.text();
-  // перші символи: )]}'
-  text = text.replace(/^\)\]\}'/, "");
-  const json = JSON.parse(text);
-  return json.familyMetadataList || json.fonts || [];
-}
-
-function normalizeFamily(name) {
+function buildWebfontsSlug(name) {
   return (name || "")
+    .toString()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
-    .replace(/[-_]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function findInCatalog(figmaName, catalog) {
-  if (!figmaName) return null;
-  const n = normalizeFamily(figmaName);
-
-  // 1) точне співпадіння
-  let found = catalog.find(
-    (f) => normalizeFamily(f.family) === n || normalizeFamily(f.name) === n
-  );
-  if (found) return found;
-
-  // 2) без пробілів
-  const noSpace = n.replace(/\s+/g, "");
-  found = catalog.find(
-    (f) =>
-      normalizeFamily(f.family).replace(/\s+/g, "") === noSpace ||
-      normalizeFamily(f.name || "").replace(/\s+/g, "") === noSpace
-  );
-  if (found) return found;
-
-  // 3) часткове
-  found = catalog.find((f) =>
-    normalizeFamily(f.family).includes(n)
-  );
-  if (found) return found;
-
-  return null;
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 function parseVariantKey(key) {
   const k = (key || "").toLowerCase();
-  let italic = k.includes("italic") || /i$/.test(k);
+  let italic = k.includes("italic") || /-italic$/.test(k);
   let weight = 400;
 
-  const num = k.match(/\d+/);
+  const num = k.match(/\b([1-9]00)\b/);
   if (num) {
-    weight = parseInt(num[0], 10);
+    weight = parseInt(num[1], 10);
   } else if (k.includes("thin")) weight = 100;
   else if (k.includes("extralight") || k.includes("ultralight")) weight = 200;
   else if (k.includes("light")) weight = 300;
@@ -508,36 +475,158 @@ function weightName(weight) {
   return "Black";
 }
 
-// завантажує всі woff2 файли для сімейства з каталогу
-async function downloadFamilyFromCatalog(catalogEntry, outFontsDir) {
-  const family = catalogEntry.family;
-  const files = catalogEntry.files || catalogEntry.variants || {};
-  const familySlug = family.replace(/\s+/g, "_");
-  let count = 0;
+function variantFolderName(weight, italic) {
+  const base = weightName(weight);
+  return italic ? `${base}Italic` : base;
+}
 
-  for (const [variantKey, url] of Object.entries(files)) {
-    // в metadata/fonts файли можуть бути різних форматів — беремо тільки woff2
-    if (!url || !/\.woff2(\?|$)/.test(url)) continue;
-    const { weight, italic } = parseVariantKey(variantKey);
-    const wName = weightName(weight);
-    const folderName = italic ? `${wName}Italic` : wName;
-    const folderPath = path.join(outFontsDir, familySlug, folderName);
-    ensureDir(folderPath);
+function sanitizePathComponent(name, replaceSpaces = false) {
+  const cleaned = (name || "")
+    .toString()
+    .replace(/[\\/:*?"<>|]/g, "")
+    .trim();
+  if (!cleaned) return "Font";
+  return replaceSpaces ? cleaned.replace(/\s+/g, "-") : cleaned;
+}
 
-    const fileName = `${familySlug}-${folderName}.woff2`;
-    const filePath = path.join(folderPath, fileName);
+function renderFontProgress(name, percent, done = false) {
+  const pct = Math.max(0, Math.min(100, percent | 0));
+  const label = `⏳ ${name} ${pct}%`;
+  const padded = label.padEnd(48, " ");
+  process.stdout.write(`\r${padded}`);
+  if (done) process.stdout.write("\n");
+}
 
+function writeManualList(outFontsDir, manualList) {
+  const manualDir = path.join(outFontsDir, "manual");
+  const manualFile = path.join(manualDir, "fonts.txt");
+  if (manualList.length) {
+    ensureDir(manualDir);
+    const content = `These fonts require manual installation:\n${manualList
+      .map((name) => `- ${name}`)
+      .join("\n")}\n`;
+    fs.writeFileSync(manualFile, content, "utf8");
+  } else if (fs.existsSync(manualFile)) {
+    fs.unlinkSync(manualFile);
     try {
-      const res = await fetch(url, { headers: BROWSER_HEADERS });
-      if (!res.ok) continue;
-      const buf = Buffer.from(await res.arrayBuffer());
-      fs.writeFileSync(filePath, buf);
-      count++;
+      if (!fs.readdirSync(manualDir).length) {
+        fs.rmdirSync(manualDir);
+      }
     } catch {
-      // пропускаємо
+      // ignore cleanup errors
     }
   }
-  return count;
+}
+
+async function downloadFamilyFromWebfontsHelper(familyName, variantsMap, outFontsDir) {
+  const slugFamily = buildWebfontsSlug(familyName);
+  if (!slugFamily) {
+    return {
+      count: 0,
+      labels: [],
+      manual: true,
+      message: "empty-family-name",
+    };
+  }
+
+  const url = `https://gwfh.mranftl.com/api/fonts/${encodeURIComponent(
+    slugFamily
+  )}?download=zip&subsets=latin&formats=woff2`;
+
+  let res;
+  try {
+    res = await fetchWithRetry(url, { headers: BROWSER_HEADERS }, 3, 300);
+  } catch (e) {
+    return {
+      count: 0,
+      labels: [],
+      manual: true,
+      message: e.message || "request-failed",
+    };
+  }
+
+  if (!res.ok) {
+    return {
+      count: 0,
+      labels: [],
+      manual: true,
+      message: `HTTP ${res.status}`,
+    };
+  }
+
+  const buf = Buffer.from(await res.arrayBuffer());
+  const zip = await JSZip.loadAsync(buf);
+
+  const variantMap = new Map();
+
+  const hasRequestedVariants = variantsMap && variantsMap.size > 0;
+
+  const files = [];
+  zip.forEach((relPath, file) => {
+    if (file.dir) return;
+    if (!/\.woff2$/i.test(relPath)) return;
+    files.push({ relPath, file });
+  });
+
+  for (const { relPath, file } of files) {
+    const baseName = path.basename(relPath).toLowerCase().replace(/\.woff2$/i, "");
+    const { weight, italic } = parseVariantKey(baseName);
+
+    if (hasRequestedVariants) {
+      const flags = variantsMap.get(weight);
+      if (!flags) continue;
+      if (italic && !flags.italic) continue;
+      if (!italic && !flags.normal) continue;
+    }
+
+    const key = `${weight}-${italic ? "i" : "n"}`;
+    if (!variantMap.has(key)) {
+      variantMap.set(key, { file, weight, italic });
+    }
+  }
+
+  const variants = [...variantMap.values()];
+  if (!variants.length) {
+    renderFontProgress(familyName, 100, true);
+    return {
+      count: 0,
+      labels: [],
+      manual: true,
+      message: "no-matching-variants",
+    };
+  }
+
+  const familyDirName = sanitizePathComponent(familyName);
+  const familyForFile = sanitizePathComponent(familyName, false).replace(/\s+/g, "");
+  const labels = [];
+
+  let processed = 0;
+  const total = variants.length;
+
+  for (const v of variants) {
+    const folderName = variantFolderName(v.weight, v.italic);
+    const folderPath = path.join(outFontsDir, familyDirName, folderName);
+    ensureDir(folderPath);
+
+    const fileVariant = folderName; // e.g. Bold, RegularItalic
+    const fileName = `${familyForFile}-${fileVariant}.woff2`;
+    const filePath = path.join(folderPath, fileName);
+
+    const content = await v.file.async("nodebuffer");
+    fs.writeFileSync(filePath, content);
+    labels.push(`${weightName(v.weight)}${v.italic ? " Italic" : ""}`);
+
+    processed++;
+    const percent = Math.round((processed / total) * 100);
+    renderFontProgress(familyName, percent, processed === total);
+  }
+
+  return {
+    count: variants.length,
+    labels,
+    manual: false,
+    message: null,
+  };
 }
 
 // ---------- ZIP ----------
@@ -620,12 +709,11 @@ async function actionUpdateScss(scssPath, fileId, nodeId) {
   return { frame, acc };
 }
 
-// ---------- ACTION: FONTS ----------
+// ---------- ACTION: FONTS (Webfonts Helper) ----------
 async function actionFonts(fileId, nodeId) {
   console.log(chalk.cyan("\n🔧 Завантаження шрифтів..."));
   const frame = await fetchFrame(fileId, nodeId);
 
-  // 🟢 FIX: повна структура accumulator
   const accFonts = {
     colors: new Set(),
     textSizes: new Set(),
@@ -637,89 +725,125 @@ async function actionFonts(fileId, nodeId) {
   traverseFrame(frame, accFonts);
 
   const fontKeys = [...accFonts.fonts];
-  const familiesMap = new Map();
+
+  const usageMap = new Map();
   for (const key of fontKeys) {
-    const [family, weightStr] = key.split("::");
-    const w = Number(weightStr) || 400;
-    const famNorm = family.trim();
-    if (!familiesMap.has(famNorm)) familiesMap.set(famNorm, new Set());
-    familiesMap.get(famNorm).add(w);
+    const [familyRaw = "", weightStr = "", italicFlag = "n"] = key.split("::");
+    const fam = familyRaw.trim();
+    if (!fam) continue;
+
+    if (!usageMap.has(fam)) {
+      usageMap.set(fam, {
+        name: fam,
+        variants: new Map(), // weight -> { normal, italic }
+      });
+    }
+    const usage = usageMap.get(fam);
+    const weight = Number(weightStr) || 400;
+    const italic = italicFlag === "i";
+
+    if (!usage.variants.has(weight)) {
+      usage.variants.set(weight, { normal: false, italic: false });
+    }
+    usage.variants.get(weight)[italic ? "italic" : "normal"] = true;
   }
 
-  const families = [...familiesMap.keys()];
-  if (!families.length) {
+  const usages = [...usageMap.values()];
+  if (!usages.length) {
     console.log(chalk.gray("⚠️ У фреймі не знайдено текстових шарів"));
     return { ok: 0, manual: 0 };
   }
 
-  console.log(chalk.green(`🖋️ Шрифти: ${families.join(", ")}`));
+  const fontsList = usages.map((u) => u.name).join(", ");
+  console.log(chalk.green(`🖋️ Шрифти: ${fontsList}`));
 
-  const catalog = await fetchGoogleCatalog();
   const outFonts = path.join("dist", "assets", "fonts");
   ensureDir(outFonts);
 
+  const manualSet = new Set();
   let downloadedFamilies = 0;
-  const manualFamilies = [];
   let processed = 0;
-  const total = families.length;
+  const total = usages.length;
 
-  for (const fam of families) {
+  for (const usage of usages) {
     processed++;
     const percent = Math.round((processed / total) * 100);
     process.stdout.write(
       `\r${chalk.cyan("⏳ Шрифти")} ${processed}/${total} (${percent}%)   `
     );
 
-    const entry = findInCatalog(fam, catalog);
-    if (!entry) {
-      console.log(`\n${chalk.yellow(`⚠️ ${fam}: не знайдено в Google Fonts`)}`);
-      manualFamilies.push(fam);
-      continue;
-    }
+    process.stdout.write("\n");
+
+    let result;
     try {
-      const count = await downloadFamilyFromCatalog(entry, outFonts);
-      if (count > 0) {
-        downloadedFamilies++;
+      result = await downloadFamilyFromWebfontsHelper(
+        usage.name,
+        usage.variants,
+        outFonts
+      );
+    } catch (e) {
+      result = {
+        count: 0,
+        labels: [],
+        manual: true,
+        message: e.message || "unknown-error",
+      };
+    }
+
+    if (result.count > 0) {
+      downloadedFamilies++;
+      const fileWord =
+        result.count === 1 ? "файл" : result.count >= 5 ? "файлів" : "файли";
+      const details =
+        result.labels && result.labels.length
+          ? ` (${result.labels.join(", ")})`
+          : "";
+      console.log(
+        chalk.green(
+          `📚 ${usage.name}: ${result.count} ${fileWord}${details}`
+        )
+      );
+    } else {
+      if (result.message === "HTTP 404") {
         console.log(
-          `\n${chalk.green(`📚 ${entry.family}: завантажено ${count} файлів`)}`
+          chalk.yellow(
+            `⚠️ ${usage.name}: не знайдено у Webfonts Helper (ймовірно, не Google Fonts)`
+          )
+        );
+      } else if (result.message === "no-matching-variants") {
+        console.log(
+          chalk.yellow(
+            `⚠️ ${usage.name}: не знайдено потрібних варіантів (вага/italic)`
+          )
         );
       } else {
         console.log(
-          `\n${chalk.yellow(
-            `⚠️ ${entry.family}: немає доступних woff2 файлів`
-          )}`
+          chalk.yellow(
+            `⚠️ ${usage.name}: немає доступних woff2 файлів${
+              result.message ? ` (${result.message})` : ""
+            }`
+          )
         );
-        manualFamilies.push(fam);
       }
-    } catch (e) {
-      console.log(
-        `\n${chalk.red(`⚠️ ${fam}: помилка завантаження (${e.message})`)}`
-      );
-      manualFamilies.push(fam);
+      manualSet.add(usage.name);
     }
-    await sleep(150);
+
+    await sleep(120);
   }
 
   process.stdout.write("\n");
 
-  if (manualFamilies.length) {
-    const manualDir = path.join(outFonts, "manual");
-    ensureDir(manualDir);
-    fs.writeFileSync(
-      path.join(manualDir, "fonts.txt"),
-      `Fonts to install manually:\n\n${manualFamilies
-        .map((f) => `- ${f}`)
-        .join("\n")}\n`,
-      "utf8"
-    );
-  }
+  const manualList = [...manualSet]
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+  writeManualList(outFonts, manualList);
 
   console.log(
     chalk.green(
-      `✅ Завантажено: ${downloadedFamilies}, локальних/ручних: ${manualFamilies.length}`
+      `✅ Завантажено: ${downloadedFamilies}, локальних/ручних: ${manualList.length}`
     )
   );
-  return { ok: downloadedFamilies, manual: manualFamilies.length };
+  return { ok: downloadedFamilies, manual: manualList.length };
 }
 
 // ---------- ACTION: ICONS ----------
@@ -797,7 +921,7 @@ async function main() {
 
   // SCSS
   if (action === "scss" || action === "all") {
-    const { frame, acc } = await actionUpdateScss(scssPath, fileId, nodeId);
+    const { acc } = await actionUpdateScss(scssPath, fileId, nodeId);
     summary.colors = acc.colors.size;
     summary.texts = acc.textSizes.size;
     summary.shadows = acc.shadows.size;
@@ -846,3 +970,4 @@ main().catch((e) => {
   console.error(chalk.red(`❌ Помилка: ${e.message}`));
   process.exit(1);
 });
+

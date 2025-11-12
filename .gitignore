@@ -5,6 +5,9 @@ dist/
 # Environment
 .env
 .env.*
+dist/*
+!dist/.gitkeep
+
 
 # OS / IDE
 .DS_Store
