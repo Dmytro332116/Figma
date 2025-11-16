@@ -62,6 +62,8 @@ const slug = (s = "") =>
     .replace(/^-+|-+$/g, "")
     .toLowerCase() || "node";
 
+const SHADOW_VALUE_RE = /(rgba?|#)[^;]*\d+px[^;]*\d+px/;
+
 const GENERIC_NODE_NAMES = new Set([
   "rectangle",
   "rect",
@@ -84,6 +86,57 @@ function normalizePathNames(names = []) {
     .map((n) => n.replace(/\s+/g, " "));
 }
 
+function splitSegmentIntoTokens(segment = "") {
+  const trimmed = (segment || "").trim();
+  if (!trimmed) return [];
+  const normalized = trimmed
+    .replace(/[(){}\[\]]/g, " ")
+    .replace(/[._]/g, " ")
+    .replace(/[\u2010-\u2015]/g, " ")
+    .replace(/([a-zA-Z])(\d)/g, "$1 $2")
+    .replace(/(\d)([a-zA-Z])/g, "$1 $2");
+  const tokens = normalized
+    .split(/[^a-zA-Z0-9]+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+  return tokens.length ? tokens : [trimmed];
+}
+
+function collectSlugVariants(segments = []) {
+  const cleaned = segments
+    .map((segment) => (segment || "").trim())
+    .filter(Boolean);
+  if (!cleaned.length) return [];
+
+  const exploded = cleaned.flatMap((seg) => splitSegmentIntoTokens(seg));
+  if (!exploded.length) return [];
+
+  const slugs = new Set();
+  const addSlug = (parts) => {
+    if (!parts?.length) return;
+    const s = slug(parts.filter(Boolean).join(" "));
+    if (s) slugs.add(s);
+  };
+
+  // contiguous slices (усі підпослідовності, не тільки суфікси)
+  for (let start = 0; start < exploded.length; start++) {
+    for (let end = start + 1; end <= exploded.length; end++) {
+      addSlug(exploded.slice(start, end));
+    }
+  }
+
+  // pairwise combos (first + last, first + any child, etc.)
+  if (exploded.length >= 2) {
+    for (let i = 0; i < exploded.length - 1; i++) {
+      for (let j = i + 1; j < exploded.length; j++) {
+        addSlug([exploded[i], exploded[j]]);
+      }
+    }
+  }
+
+  return Array.from(slugs).sort((a, b) => b.length - a.length);
+}
+
 function buildSlugCandidates(names = []) {
   const normalized = normalizePathNames(names);
   if (!normalized.length) return [];
@@ -91,6 +144,7 @@ function buildSlugCandidates(names = []) {
     (name) => !GENERIC_NODE_NAMES.has(name.toLowerCase())
   );
   const segments = meaningful.length ? meaningful : normalized;
+  return collectSlugVariants(segments);
   const slugs = new Set();
   for (let i = 0; i < segments.length; i++) {
     const slice = segments.slice(i).join(" ");
@@ -107,6 +161,7 @@ function buildVarSlugCandidates(varName = "") {
     .replace(/\s+/g, "-");
   const pieces = clean.split(/-+/).filter(Boolean);
   if (!pieces.length) return [];
+  return collectSlugVariants(pieces);
   const slugs = new Set();
   for (let i = 0; i < pieces.length; i++) {
     const slice = pieces.slice(i).join(" ");
@@ -153,6 +208,53 @@ const rgbaOrHex = (color, alphaOverride) => {
     ? `rgba(${r}, ${g}, ${b}, ${Number(a.toFixed(3))})`
     : `#${hex2(r)}${hex2(g)}${hex2(b)}`;
 };
+
+const FONT_SIZE_HINT_RE =
+  /(font|text|headline|title|display|body|caption|paragraph|button|size|desktop---|mobile---)/;
+const LINE_HEIGHT_HINT_RE = /(lineheight|line-height|leading|line|\blh\b)/;
+const DESKTOP_HINT_RE = /(desktop|desk|web|lg|xl|xxl|hd|desktop---)/;
+
+function slugMatches(slugs, regex) {
+  if (!slugs?.length) return false;
+  return slugs.some((s) => regex.test(s));
+}
+
+function inferDesktopFromSlugs(slugs) {
+  return slugMatches(slugs, DESKTOP_HINT_RE);
+}
+
+function coerceNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (typeof value === "object" && value !== null) {
+    if (typeof value.value === "number" && Number.isFinite(value.value)) {
+      return value.value;
+    }
+    if (typeof value.v === "number" && Number.isFinite(value.v)) {
+      return value.v;
+    }
+  }
+  return null;
+}
+
+function formatFontSizeNumber(value, slugs) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  const isDesktop = inferDesktopFromSlugs(slugs);
+  return wrapRem(px(value), isDesktop);
+}
+
+function formatLineHeightNumber(value, slugs) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  if (value <= 5) {
+    const formatted = formatUnitless(value);
+    return formatted || null;
+  }
+  const isDesktop = inferDesktopFromSlugs(slugs);
+  return wrapRem(px(value), isDesktop);
+}
 
 const px = (n) => `${Math.round(n || 0)}px`;
 const wrapRem = (pxVal, isDesktop) =>
@@ -205,13 +307,93 @@ async function figmaGET(url) {
 }
 
 async function fetchFrame(fileId, nodeId) {
-  const url = `https://api.figma.com/v1/files/${fileId}/nodes?ids=${encodeURIComponent(
-    nodeId
-  )}`;
-  const data = await figmaGET(url);
-  const doc = data?.nodes?.[nodeId]?.document;
+  const nodes = await fetchNodesById(fileId, [nodeId]);
+  const doc = nodes.get(nodeId);
   if (!doc) throw new Error("Не знайдено документ фрейму.");
   return doc;
+}
+
+async function fetchNodesById(fileId, nodeIds = []) {
+  const uniqueIds = Array.from(new Set(nodeIds.filter(Boolean)));
+  const result = new Map();
+  if (!uniqueIds.length) return result;
+  const chunkSize = 45;
+  for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+    const chunk = uniqueIds.slice(i, i + chunkSize);
+    const url = `https://api.figma.com/v1/files/${fileId}/nodes?ids=${encodeURIComponent(
+      chunk.join(",")
+    )}`;
+    const data = await figmaGET(url);
+    const nodeMap = data?.nodes || {};
+    for (const id of chunk) {
+      const doc = nodeMap?.[id]?.document;
+      if (doc) result.set(id, doc);
+    }
+  }
+  return result;
+}
+
+async function fetchFileStyles(fileId) {
+  const url = `https://api.figma.com/v1/files/${fileId}/styles`;
+  const data = await figmaGET(url);
+  return Array.isArray(data?.meta?.styles) ? data.meta.styles : [];
+}
+
+async function fetchVariablePayload(fileId, scope) {
+  const url = `https://api.figma.com/v1/files/${fileId}/variables/${scope}`;
+  try {
+    const data = await figmaGET(url);
+    return data?.meta || null;
+  } catch (err) {
+    const msg = (err?.message || "").toLowerCase();
+    if (msg.includes("http 404") || msg.includes("http 403")) {
+      console.warn(
+        chalk.gray(
+          `⚠️  Variables ${scope} недоступні для цього файлу (${err.message})`
+        )
+      );
+      return null;
+    }
+    throw err;
+  }
+}
+
+async function fetchVariablesForFile(fileId) {
+  const scopes = ["local", "published"];
+  const aggregated = {
+    variables: [],
+    collections: [],
+    modes: [],
+  };
+  const seenVariables = new Set();
+  const seenCollections = new Set();
+  const seenModes = new Set();
+  for (const scope of scopes) {
+    const meta = await fetchVariablePayload(fileId, scope);
+    if (!meta) continue;
+    if (Array.isArray(meta.variables)) {
+      for (const variable of meta.variables) {
+        if (!variable?.id || seenVariables.has(variable.id)) continue;
+        seenVariables.add(variable.id);
+        aggregated.variables.push(variable);
+      }
+    }
+    if (Array.isArray(meta.variableCollections)) {
+      for (const collection of meta.variableCollections) {
+        if (!collection?.id || seenCollections.has(collection.id)) continue;
+        seenCollections.add(collection.id);
+        aggregated.collections.push(collection);
+      }
+    }
+    if (Array.isArray(meta.modes)) {
+      for (const mode of meta.modes) {
+        if (!mode?.modeId || seenModes.has(mode.modeId)) continue;
+        seenModes.add(mode.modeId);
+        aggregated.modes.push(mode);
+      }
+    }
+  }
+  return aggregated;
 }
 
 // ---------- FRAME TRAVERSE ----------
@@ -256,6 +438,253 @@ function createTraversalAccumulator() {
     fonts: new Set(),
     iconNodes: [],
   };
+}
+
+function emptyStyleTokens() {
+  return {
+    colorsBySlug: new Map(),
+    fontSizeBySlug: new Map(),
+    lineHeightBySlug: new Map(),
+    shadowsBySlug: new Map(),
+  };
+}
+
+function mergeSlugMaps(target, source) {
+  if (!target || !source) return;
+  for (const [slugKey, val] of source) {
+    target.set(slugKey, val);
+  }
+}
+
+function paintToColorString(paint) {
+  if (!paint || paint.visible === false) return null;
+  const paintOpacity = clamp01(typeof paint.opacity === "number" ? paint.opacity : 1);
+  if (paint.type === "SOLID" && paint.color) {
+    const alpha = composeAlpha(1, paintOpacity, typeof paint.color.a === "number" ? paint.color.a : 1);
+    return rgbaOrHex(paint.color, alpha);
+  }
+  if (
+    paint.type &&
+    paint.type.startsWith("GRADIENT") &&
+    Array.isArray(paint.gradientStops)
+  ) {
+    const firstStop = paint.gradientStops[0];
+    if (firstStop?.color) {
+      const alpha = composeAlpha(
+        1,
+        paintOpacity,
+        typeof firstStop.color.a === "number" ? firstStop.color.a : 1
+      );
+      return rgbaOrHex(firstStop.color, alpha);
+    }
+  }
+  return null;
+}
+
+function extractColorFromStyleNode(node) {
+  if (Array.isArray(node?.fills)) {
+    for (const paint of node.fills) {
+      const val = paintToColorString(paint);
+      if (val) return val;
+    }
+  }
+  if (Array.isArray(node?.strokes)) {
+    for (const paint of node.strokes) {
+      const val = paintToColorString(paint);
+      if (val) return val;
+    }
+  }
+  return null;
+}
+
+function extractShadowFromStyleNode(node) {
+  if (!Array.isArray(node?.effects)) return null;
+  const parts = [];
+  for (const e of node.effects) {
+    if (!e || e.visible === false) continue;
+    if (e.type !== "DROP_SHADOW" && e.type !== "INNER_SHADOW") continue;
+    const offX = px(e.offset?.x ?? 0);
+    const offY = px(e.offset?.y ?? 0);
+    const blur = px(e.radius ?? 0);
+    const alpha = composeAlpha(1, 1, typeof e.color?.a === "number" ? e.color.a : 1);
+    const col = rgbaOrHex(e.color, alpha);
+    parts.push([offX, offY, blur, col].join(" "));
+  }
+  return parts.length ? parts.join(", ") : null;
+}
+
+function extractTypographyFromStyleNode(node, slugHints, target) {
+  if (!node?.style) return;
+  const { fontSize } = node.style;
+  const hasFontSize = typeof fontSize === "number" && fontSize > 0;
+  const pathHint = (node.name || "").toLowerCase();
+  const isDesktop = pathHint.includes("desktop") || (hasFontSize && fontSize >= 20);
+  if (hasFontSize) {
+    const sizePx = px(fontSize);
+    assignValueBySlug(target.fontSizeBySlug, slugHints, wrapRem(sizePx, isDesktop));
+  }
+  const lineHeight = formatLineHeight(node.style, isDesktop);
+  if (lineHeight)
+    assignValueBySlug(target.lineHeightBySlug, slugHints, lineHeight);
+}
+
+async function collectStyleTokens(fileId) {
+  const tokens = emptyStyleTokens();
+  const styles = await fetchFileStyles(fileId);
+  if (!styles.length) return tokens;
+  const interesting = styles.filter((s) =>
+    s?.style_type && ["FILL", "TEXT", "EFFECT"].includes(s.style_type)
+  );
+  if (!interesting.length) return tokens;
+  const nodes = await fetchNodesById(
+    fileId,
+    interesting.map((s) => s.node_id)
+  );
+  for (const style of interesting) {
+    const node = nodes.get(style.node_id);
+    if (!node) continue;
+    const pathSegments = (style.name || "")
+      .split("/")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    const slugHints = buildSlugCandidates(pathSegments);
+    if (!slugHints.length) continue;
+    if (style.style_type === "FILL") {
+      const val = extractColorFromStyleNode(node);
+      if (val) assignValueBySlug(tokens.colorsBySlug, slugHints, val);
+      continue;
+    }
+    if (style.style_type === "TEXT") {
+      extractTypographyFromStyleNode(node, slugHints, tokens);
+      continue;
+    }
+    if (style.style_type === "EFFECT") {
+      const val = extractShadowFromStyleNode(node);
+      if (val) assignValueBySlug(tokens.shadowsBySlug, slugHints, val);
+    }
+  }
+  return tokens;
+}
+
+function chooseVariableModeId(variable, collectionMap) {
+  const values = variable?.valuesByMode;
+  if (!values || !Object.keys(values).length) return null;
+  const collection = collectionMap.get(variable?.variableCollectionId);
+  const preferred = collection?.defaultModeId;
+  if (preferred && values[preferred]) return preferred;
+  return Object.keys(values)[0];
+}
+
+function resolveVariableAlias(variableMap, value, modeId, depth = 0) {
+  if (!value) return null;
+  if (depth > 50) return null;
+  if (value.type === "VARIABLE_ALIAS" && value.id) {
+    const target = variableMap.get(value.id);
+    if (!target) return null;
+    const nextValue = target.valuesByMode?.[modeId];
+    return resolveVariableAlias(variableMap, nextValue, modeId, depth + 1);
+  }
+  return value;
+}
+
+function normalizeVariableColorValue(entry) {
+  if (!entry) return null;
+  if (
+    typeof entry.r === "number" &&
+    typeof entry.g === "number" &&
+    typeof entry.b === "number"
+  ) {
+    return {
+      r: clamp01(entry.r),
+      g: clamp01(entry.g),
+      b: clamp01(entry.b),
+      a: typeof entry.a === "number" ? clamp01(entry.a) : 1,
+    };
+  }
+  if (typeof entry === "string" && /^#/.test(entry)) {
+    const hex = entry.replace(/^#/, "");
+    if (hex.length === 3 || hex.length === 6) {
+      const full = hex.length === 3 ? hex.split("").map((c) => c + c).join("") : hex;
+      const num = parseInt(full, 16);
+      if (!Number.isNaN(num)) {
+        return {
+          r: ((num >> 16) & 255) / 255,
+          g: ((num >> 8) & 255) / 255,
+          b: (num & 255) / 255,
+          a: 1,
+        };
+      }
+    }
+  }
+  return null;
+}
+
+async function collectVariableTokens(fileId) {
+  const tokens = emptyStyleTokens();
+  const meta = await fetchVariablesForFile(fileId);
+  if (!meta?.variables?.length) return tokens;
+
+  const collectionMap = new Map();
+  for (const col of meta.collections || []) {
+    if (col?.id) collectionMap.set(col.id, col);
+  }
+
+  const variableMap = new Map();
+  for (const variable of meta.variables) {
+    if (variable?.id) variableMap.set(variable.id, variable);
+  }
+
+  for (const variable of meta.variables) {
+    if (!variable) continue;
+    const segments = (variable.name || "")
+      .split("/")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    const slugHints = buildSlugCandidates(segments);
+    if (!slugHints.length) continue;
+    const modeId = chooseVariableModeId(variable, collectionMap);
+    if (!modeId) continue;
+    const rawValue = resolveVariableAlias(
+      variableMap,
+      variable.valuesByMode?.[modeId],
+      modeId
+    );
+
+    if (variable.resolvedType === "COLOR") {
+      const colorValue = normalizeVariableColorValue(rawValue);
+      if (!colorValue) continue;
+      const formatted = rgbaOrHex(colorValue, colorValue.a);
+      if (formatted) assignValueBySlug(tokens.colorsBySlug, slugHints, formatted);
+      continue;
+    }
+
+    if (variable.resolvedType === "FLOAT") {
+      const numeric = coerceNumber(rawValue);
+      if (numeric == null) continue;
+      const wantsLineHeight = slugMatches(slugHints, LINE_HEIGHT_HINT_RE);
+      const wantsFontSize = slugMatches(slugHints, FONT_SIZE_HINT_RE);
+      if (wantsFontSize) {
+        const formatted = formatFontSizeNumber(numeric, slugHints);
+        if (formatted) assignValueBySlug(tokens.fontSizeBySlug, slugHints, formatted);
+        continue;
+      }
+      if (wantsLineHeight) {
+        const formatted = formatLineHeightNumber(numeric, slugHints);
+        if (formatted)
+          assignValueBySlug(tokens.lineHeightBySlug, slugHints, formatted);
+      }
+      continue;
+    }
+
+    if (variable.resolvedType === "STRING") {
+      const str = typeof rawValue === "string" ? rawValue.trim() : null;
+      if (str && SHADOW_VALUE_RE.test(str)) {
+        assignValueBySlug(tokens.shadowsBySlug, slugHints, str);
+      }
+    }
+  }
+
+  return tokens;
 }
 
 // обхід дерева фрейму, збираємо все одразу
@@ -429,6 +858,7 @@ function classifyVar(name, value) {
   const looksHex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.test(v);
   const looksRgba = /^rgba?\(/.test(v);
   const looksRemFn = /#\{remd?\(/.test(v) || /rem\(/.test(v);
+  const looksShadowValue = SHADOW_VALUE_RE.test(v);
   const looksShadowValue = /(rgba?|#)[^;]*\d+px[^;]*\d+px/.test(v);
   const looksPxNumber = /\d+px/.test(v);
   const looksUnitlessNumber = /^-?\d+(?:\.\d+)?$/.test(v);
@@ -850,6 +1280,16 @@ async function actionUpdateScss(scssPath, fileId, nodeId) {
   const frame = await fetchFrame(fileId, nodeId);
   const acc = createTraversalAccumulator();
   traverseFrame(frame, acc);
+  const styleTokens = await collectStyleTokens(fileId);
+  const variableTokens = await collectVariableTokens(fileId);
+  mergeSlugMaps(acc.colorsBySlug, styleTokens.colorsBySlug);
+  mergeSlugMaps(acc.fontSizeBySlug, styleTokens.fontSizeBySlug);
+  mergeSlugMaps(acc.lineHeightBySlug, styleTokens.lineHeightBySlug);
+  mergeSlugMaps(acc.shadowsBySlug, styleTokens.shadowsBySlug);
+  mergeSlugMaps(acc.colorsBySlug, variableTokens.colorsBySlug);
+  mergeSlugMaps(acc.fontSizeBySlug, variableTokens.fontSizeBySlug);
+  mergeSlugMaps(acc.lineHeightBySlug, variableTokens.lineHeightBySlug);
+  mergeSlugMaps(acc.shadowsBySlug, variableTokens.shadowsBySlug);
 
   console.log(chalk.green(`🎨 Кольори: ${acc.colorsBySlug.size}`));
   console.log(chalk.green(`🅰️ Font-size: ${acc.fontSizeBySlug.size}`));
