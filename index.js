@@ -145,6 +145,13 @@ function buildSlugCandidates(names = []) {
   );
   const segments = meaningful.length ? meaningful : normalized;
   return collectSlugVariants(segments);
+  const slugs = new Set();
+  for (let i = 0; i < segments.length; i++) {
+    const slice = segments.slice(i).join(" ");
+    const s = slug(slice);
+    if (s) slugs.add(s);
+  }
+  return Array.from(slugs).sort((a, b) => b.length - a.length);
 }
 
 function buildVarSlugCandidates(varName = "") {
@@ -155,6 +162,13 @@ function buildVarSlugCandidates(varName = "") {
   const pieces = clean.split(/-+/).filter(Boolean);
   if (!pieces.length) return [];
   return collectSlugVariants(pieces);
+  const slugs = new Set();
+  for (let i = 0; i < pieces.length; i++) {
+    const slice = pieces.slice(i).join(" ");
+    const s = slug(slice);
+    if (s) slugs.add(s);
+  }
+  return Array.from(slugs).sort((a, b) => b.length - a.length);
 }
 
 function assignValueBySlug(map, slugs, value) {
@@ -502,6 +516,20 @@ function collectColorsFromDocumentTree(doc, styleIdSet) {
 
   visit(doc);
   return result;
+function extractColorFromStyleNode(node) {
+  if (Array.isArray(node?.fills)) {
+    for (const paint of node.fills) {
+      const val = paintToColorString(paint);
+      if (val) return val;
+    }
+  }
+  if (Array.isArray(node?.strokes)) {
+    for (const paint of node.strokes) {
+      const val = paintToColorString(paint);
+      if (val) return val;
+    }
+  }
+  return null;
 }
 
 function extractShadowFromStyleNode(node) {
@@ -545,6 +573,13 @@ async function collectStyleTokens(fileId) {
   if (!interesting.length) return tokens;
   const slugHintsByStyleId = new Map();
   for (const style of interesting) {
+  const nodes = await fetchNodesById(
+    fileId,
+    interesting.map((s) => s.node_id)
+  );
+  for (const style of interesting) {
+    const node = nodes.get(style.node_id);
+    if (!node) continue;
     const pathSegments = (style.name || "")
       .split("/")
       .map((p) => p.trim())
@@ -580,6 +615,12 @@ async function collectStyleTokens(fileId) {
     if (!node) continue;
     const slugHints = slugHintsByStyleId.get(style.node_id);
     if (!slugHints?.length) continue;
+    if (!slugHints.length) continue;
+    if (style.style_type === "FILL") {
+      const val = extractColorFromStyleNode(node);
+      if (val) assignValueBySlug(tokens.colorsBySlug, slugHints, val);
+      continue;
+    }
     if (style.style_type === "TEXT") {
       extractTypographyFromStyleNode(node, slugHints, tokens);
       continue;
@@ -885,6 +926,7 @@ function classifyVar(name, value) {
   const looksRgba = /^rgba?\(/.test(v);
   const looksRemFn = /#\{remd?\(/.test(v) || /rem\(/.test(v);
   const looksShadowValue = SHADOW_VALUE_RE.test(v);
+  const looksShadowValue = /(rgba?|#)[^;]*\d+px[^;]*\d+px/.test(v);
   const looksPxNumber = /\d+px/.test(v);
   const looksUnitlessNumber = /^-?\d+(?:\.\d+)?$/.test(v);
   const mentionsLineHeight = /line[-_ ]?height|leading|lineheight|\blh\b/.test(n);
