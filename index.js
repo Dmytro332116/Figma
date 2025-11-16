@@ -339,6 +339,12 @@ async function fetchFileStyles(fileId) {
   return Array.isArray(data?.meta?.styles) ? data.meta.styles : [];
 }
 
+async function fetchFileDocument(fileId) {
+  const url = `https://api.figma.com/v1/files/${fileId}`;
+  const data = await figmaGET(url);
+  return data?.document || null;
+}
+
 async function fetchVariablePayload(fileId, scope) {
   const url = `https://api.figma.com/v1/files/${fileId}/variables/${scope}`;
   try {
@@ -481,6 +487,35 @@ function paintToColorString(paint) {
   return null;
 }
 
+function extractColorFromFillStyle(node) {
+  if (!Array.isArray(node?.fills)) return null;
+  for (const paint of node.fills) {
+    const val = paintToColorString(paint);
+    if (val) return val;
+  }
+  return null;
+}
+
+function collectColorsFromDocumentTree(doc, styleIdSet) {
+  const result = new Map();
+  if (!doc || !styleIdSet?.size) return result;
+
+  const visit = (node) => {
+    if (!node || node.visible === false) return;
+    const styleId = node?.styles?.fill;
+    if (styleId && styleIdSet.has(styleId) && !result.has(styleId)) {
+      const val = extractColorFromFillStyle(node);
+      if (val) {
+        result.set(styleId, val);
+      }
+    }
+    if (Array.isArray(node.children)) {
+      for (const child of node.children) visit(child);
+    }
+  };
+
+  visit(doc);
+  return result;
 function extractColorFromStyleNode(node) {
   if (Array.isArray(node?.fills)) {
     for (const paint of node.fills) {
@@ -536,6 +571,8 @@ async function collectStyleTokens(fileId) {
     s?.style_type && ["FILL", "TEXT", "EFFECT"].includes(s.style_type)
   );
   if (!interesting.length) return tokens;
+  const slugHintsByStyleId = new Map();
+  for (const style of interesting) {
   const nodes = await fetchNodesById(
     fileId,
     interesting.map((s) => s.node_id)
@@ -548,6 +585,36 @@ async function collectStyleTokens(fileId) {
       .map((p) => p.trim())
       .filter(Boolean);
     const slugHints = buildSlugCandidates(pathSegments);
+    if (slugHints.length) {
+      slugHintsByStyleId.set(style.node_id, slugHints);
+    }
+  }
+
+  const colorStyles = interesting.filter((s) => s.style_type === "FILL");
+  if (colorStyles.length) {
+    const doc = await fetchFileDocument(fileId);
+    const styleIdSet = new Set(colorStyles.map((s) => s.node_id));
+    const colorValues = collectColorsFromDocumentTree(doc, styleIdSet);
+    for (const style of colorStyles) {
+      const slugHints = slugHintsByStyleId.get(style.node_id);
+      if (!slugHints?.length) continue;
+      const val = colorValues.get(style.node_id);
+      if (val) assignValueBySlug(tokens.colorsBySlug, slugHints, val);
+    }
+  }
+
+  const detailStyles = interesting.filter((s) =>
+    s.style_type === "TEXT" || s.style_type === "EFFECT"
+  );
+  const nodes = await fetchNodesById(
+    fileId,
+    detailStyles.map((s) => s.node_id)
+  );
+  for (const style of detailStyles) {
+    const node = nodes.get(style.node_id);
+    if (!node) continue;
+    const slugHints = slugHintsByStyleId.get(style.node_id);
+    if (!slugHints?.length) continue;
     if (!slugHints.length) continue;
     if (style.style_type === "FILL") {
       const val = extractColorFromStyleNode(node);
