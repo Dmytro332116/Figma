@@ -84,6 +84,36 @@ function normalizePathNames(names = []) {
     .map((n) => n.replace(/\s+/g, " "));
 }
 
+function collectSlugVariants(segments = []) {
+  const cleaned = segments
+    .map((segment) => (segment || "").trim())
+    .filter(Boolean);
+  if (!cleaned.length) return [];
+
+  const slugs = new Set();
+  const addSlug = (parts) => {
+    if (!parts?.length) return;
+    const s = slug(parts.filter(Boolean).join(" "));
+    if (s) slugs.add(s);
+  };
+
+  // contiguous slices (full path, suffixes)
+  for (let i = 0; i < cleaned.length; i++) {
+    addSlug(cleaned.slice(i));
+  }
+
+  // pairwise combos (first + last, first + any child, etc.)
+  if (cleaned.length >= 2) {
+    for (let i = 0; i < cleaned.length - 1; i++) {
+      for (let j = i + 1; j < cleaned.length; j++) {
+        addSlug([cleaned[i], cleaned[j]]);
+      }
+    }
+  }
+
+  return Array.from(slugs).sort((a, b) => b.length - a.length);
+}
+
 function buildSlugCandidates(names = []) {
   const normalized = normalizePathNames(names);
   if (!normalized.length) return [];
@@ -91,13 +121,7 @@ function buildSlugCandidates(names = []) {
     (name) => !GENERIC_NODE_NAMES.has(name.toLowerCase())
   );
   const segments = meaningful.length ? meaningful : normalized;
-  const slugs = new Set();
-  for (let i = 0; i < segments.length; i++) {
-    const slice = segments.slice(i).join(" ");
-    const s = slug(slice);
-    if (s) slugs.add(s);
-  }
-  return Array.from(slugs).sort((a, b) => b.length - a.length);
+  return collectSlugVariants(segments);
 }
 
 function buildVarSlugCandidates(varName = "") {
@@ -107,13 +131,7 @@ function buildVarSlugCandidates(varName = "") {
     .replace(/\s+/g, "-");
   const pieces = clean.split(/-+/).filter(Boolean);
   if (!pieces.length) return [];
-  const slugs = new Set();
-  for (let i = 0; i < pieces.length; i++) {
-    const slice = pieces.slice(i).join(" ");
-    const s = slug(slice);
-    if (s) slugs.add(s);
-  }
-  return Array.from(slugs).sort((a, b) => b.length - a.length);
+  return collectSlugVariants(pieces);
 }
 
 function assignValueBySlug(map, slugs, value) {
