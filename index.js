@@ -257,6 +257,63 @@ async function fetchFileStyles(fileId) {
   return Array.isArray(data?.meta?.styles) ? data.meta.styles : [];
 }
 
+async function fetchVariablePayload(fileId, scope) {
+  const url = `https://api.figma.com/v1/files/${fileId}/variables/${scope}`;
+  try {
+    const data = await figmaGET(url);
+    return data?.meta || null;
+  } catch (err) {
+    const msg = (err?.message || "").toLowerCase();
+    if (msg.includes("http 404") || msg.includes("http 403")) {
+      console.warn(
+        chalk.gray(
+          `⚠️  Variables ${scope} недоступні для цього файлу (${err.message})`
+        )
+      );
+      return null;
+    }
+    throw err;
+  }
+}
+
+async function fetchVariablesForFile(fileId) {
+  const scopes = ["local", "published"];
+  const aggregated = {
+    variables: [],
+    collections: [],
+    modes: [],
+  };
+  const seenVariables = new Set();
+  const seenCollections = new Set();
+  const seenModes = new Set();
+  for (const scope of scopes) {
+    const meta = await fetchVariablePayload(fileId, scope);
+    if (!meta) continue;
+    if (Array.isArray(meta.variables)) {
+      for (const variable of meta.variables) {
+        if (!variable?.id || seenVariables.has(variable.id)) continue;
+        seenVariables.add(variable.id);
+        aggregated.variables.push(variable);
+      }
+    }
+    if (Array.isArray(meta.variableCollections)) {
+      for (const collection of meta.variableCollections) {
+        if (!collection?.id || seenCollections.has(collection.id)) continue;
+        seenCollections.add(collection.id);
+        aggregated.collections.push(collection);
+      }
+    }
+    if (Array.isArray(meta.modes)) {
+      for (const mode of meta.modes) {
+        if (!mode?.modeId || seenModes.has(mode.modeId)) continue;
+        seenModes.add(mode.modeId);
+        aggregated.modes.push(mode);
+      }
+    }
+  }
+  return aggregated;
+}
+
 // ---------- FRAME TRAVERSE ----------
 const ICON_NAME_RE =
   /icon|icn|glyph|logo|arrow|chevron|close|burger|menu|play|pause|cart|search|user|heart|plus|minus|star/i;
@@ -424,6 +481,98 @@ async function collectStyleTokens(fileId) {
       if (val) assignValueBySlug(tokens.shadowsBySlug, slugHints, val);
     }
   }
+  return tokens;
+}
+
+function chooseVariableModeId(variable, collectionMap) {
+  const values = variable?.valuesByMode;
+  if (!values || !Object.keys(values).length) return null;
+  const collection = collectionMap.get(variable?.variableCollectionId);
+  const preferred = collection?.defaultModeId;
+  if (preferred && values[preferred]) return preferred;
+  return Object.keys(values)[0];
+}
+
+function resolveVariableAlias(variableMap, value, modeId, depth = 0) {
+  if (!value) return null;
+  if (depth > 50) return null;
+  if (value.type === "VARIABLE_ALIAS" && value.id) {
+    const target = variableMap.get(value.id);
+    if (!target) return null;
+    const nextValue = target.valuesByMode?.[modeId];
+    return resolveVariableAlias(variableMap, nextValue, modeId, depth + 1);
+  }
+  return value;
+}
+
+function normalizeVariableColorValue(entry) {
+  if (!entry) return null;
+  if (
+    typeof entry.r === "number" &&
+    typeof entry.g === "number" &&
+    typeof entry.b === "number"
+  ) {
+    return {
+      r: clamp01(entry.r),
+      g: clamp01(entry.g),
+      b: clamp01(entry.b),
+      a: typeof entry.a === "number" ? clamp01(entry.a) : 1,
+    };
+  }
+  if (typeof entry === "string" && /^#/.test(entry)) {
+    const hex = entry.replace(/^#/, "");
+    if (hex.length === 3 || hex.length === 6) {
+      const full = hex.length === 3 ? hex.split("").map((c) => c + c).join("") : hex;
+      const num = parseInt(full, 16);
+      if (!Number.isNaN(num)) {
+        return {
+          r: ((num >> 16) & 255) / 255,
+          g: ((num >> 8) & 255) / 255,
+          b: (num & 255) / 255,
+          a: 1,
+        };
+      }
+    }
+  }
+  return null;
+}
+
+async function collectVariableTokens(fileId) {
+  const tokens = emptyStyleTokens();
+  const meta = await fetchVariablesForFile(fileId);
+  if (!meta?.variables?.length) return tokens;
+
+  const collectionMap = new Map();
+  for (const col of meta.collections || []) {
+    if (col?.id) collectionMap.set(col.id, col);
+  }
+
+  const variableMap = new Map();
+  for (const variable of meta.variables) {
+    if (variable?.id) variableMap.set(variable.id, variable);
+  }
+
+  for (const variable of meta.variables) {
+    if (!variable || variable.resolvedType !== "COLOR") continue;
+    const segments = (variable.name || "")
+      .split("/")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    const slugHints = buildSlugCandidates(segments);
+    if (!slugHints.length) continue;
+    const modeId = chooseVariableModeId(variable, collectionMap);
+    if (!modeId) continue;
+    const rawValue = resolveVariableAlias(
+      variableMap,
+      variable.valuesByMode?.[modeId],
+      modeId
+    );
+    const colorValue = normalizeVariableColorValue(rawValue);
+    if (!colorValue) continue;
+    const formatted = rgbaOrHex(colorValue, colorValue.a);
+    if (formatted) assignValueBySlug(tokens.colorsBySlug, slugHints, formatted);
+  }
+
   return tokens;
 }
 
@@ -1020,10 +1169,15 @@ async function actionUpdateScss(scssPath, fileId, nodeId) {
   const acc = createTraversalAccumulator();
   traverseFrame(frame, acc);
   const styleTokens = await collectStyleTokens(fileId);
+  const variableTokens = await collectVariableTokens(fileId);
   mergeSlugMaps(acc.colorsBySlug, styleTokens.colorsBySlug);
   mergeSlugMaps(acc.fontSizeBySlug, styleTokens.fontSizeBySlug);
   mergeSlugMaps(acc.lineHeightBySlug, styleTokens.lineHeightBySlug);
   mergeSlugMaps(acc.shadowsBySlug, styleTokens.shadowsBySlug);
+  mergeSlugMaps(acc.colorsBySlug, variableTokens.colorsBySlug);
+  mergeSlugMaps(acc.fontSizeBySlug, variableTokens.fontSizeBySlug);
+  mergeSlugMaps(acc.lineHeightBySlug, variableTokens.lineHeightBySlug);
+  mergeSlugMaps(acc.shadowsBySlug, variableTokens.shadowsBySlug);
 
   console.log(chalk.green(`🎨 Кольори: ${acc.colorsBySlug.size}`));
   console.log(chalk.green(`🅰️ Font-size: ${acc.fontSizeBySlug.size}`));
