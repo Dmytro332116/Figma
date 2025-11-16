@@ -86,11 +86,30 @@ function normalizePathNames(names = []) {
     .map((n) => n.replace(/\s+/g, " "));
 }
 
+function splitSegmentIntoTokens(segment = "") {
+  const trimmed = (segment || "").trim();
+  if (!trimmed) return [];
+  const normalized = trimmed
+    .replace(/[(){}\[\]]/g, " ")
+    .replace(/[._]/g, " ")
+    .replace(/[\u2010-\u2015]/g, " ")
+    .replace(/([a-zA-Z])(\d)/g, "$1 $2")
+    .replace(/(\d)([a-zA-Z])/g, "$1 $2");
+  const tokens = normalized
+    .split(/[^a-zA-Z0-9]+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+  return tokens.length ? tokens : [trimmed];
+}
+
 function collectSlugVariants(segments = []) {
   const cleaned = segments
     .map((segment) => (segment || "").trim())
     .filter(Boolean);
   if (!cleaned.length) return [];
+
+  const exploded = cleaned.flatMap((seg) => splitSegmentIntoTokens(seg));
+  if (!exploded.length) return [];
 
   const slugs = new Set();
   const addSlug = (parts) => {
@@ -100,17 +119,17 @@ function collectSlugVariants(segments = []) {
   };
 
   // contiguous slices (усі підпослідовності, не тільки суфікси)
-  for (let start = 0; start < cleaned.length; start++) {
-    for (let end = start + 1; end <= cleaned.length; end++) {
-      addSlug(cleaned.slice(start, end));
+  for (let start = 0; start < exploded.length; start++) {
+    for (let end = start + 1; end <= exploded.length; end++) {
+      addSlug(exploded.slice(start, end));
     }
   }
 
   // pairwise combos (first + last, first + any child, etc.)
-  if (cleaned.length >= 2) {
-    for (let i = 0; i < cleaned.length - 1; i++) {
-      for (let j = i + 1; j < cleaned.length; j++) {
-        addSlug([cleaned[i], cleaned[j]]);
+  if (exploded.length >= 2) {
+    for (let i = 0; i < exploded.length - 1; i++) {
+      for (let j = i + 1; j < exploded.length; j++) {
+        addSlug([exploded[i], exploded[j]]);
       }
     }
   }
