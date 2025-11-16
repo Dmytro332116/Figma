@@ -97,9 +97,11 @@ function collectSlugVariants(segments = []) {
     if (s) slugs.add(s);
   };
 
-  // contiguous slices (full path, suffixes)
-  for (let i = 0; i < cleaned.length; i++) {
-    addSlug(cleaned.slice(i));
+  // contiguous slices (усі підпослідовності, не тільки суфікси)
+  for (let start = 0; start < cleaned.length; start++) {
+    for (let end = start + 1; end <= cleaned.length; end++) {
+      addSlug(cleaned.slice(start, end));
+    }
   }
 
   // pairwise combos (first + last, first + any child, etc.)
