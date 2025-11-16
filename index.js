@@ -62,17 +62,90 @@ const slug = (s = "") =>
     .replace(/^-+|-+$/g, "")
     .toLowerCase() || "node";
 
+const GENERIC_NODE_NAMES = new Set([
+  "rectangle",
+  "rect",
+  "frame",
+  "auto layout",
+  "group",
+  "component",
+  "component set",
+  "instance",
+  "vector",
+  "ellipse",
+  "line",
+  "text",
+]);
+
+function normalizePathNames(names = []) {
+  return names
+    .map((n) => (n || "").trim())
+    .filter(Boolean)
+    .map((n) => n.replace(/\s+/g, " "));
+}
+
+function buildSlugCandidates(names = []) {
+  const normalized = normalizePathNames(names);
+  if (!normalized.length) return [];
+  const meaningful = normalized.filter(
+    (name) => !GENERIC_NODE_NAMES.has(name.toLowerCase())
+  );
+  const segments = meaningful.length ? meaningful : normalized;
+  const slugs = new Set();
+  for (let i = 0; i < segments.length; i++) {
+    const slice = segments.slice(i).join(" ");
+    const s = slug(slice);
+    if (s) slugs.add(s);
+  }
+  return Array.from(slugs).sort((a, b) => b.length - a.length);
+}
+
+function buildVarSlugCandidates(varName = "") {
+  const clean = (varName || "")
+    .replace(/^--/, "")
+    .replace(/_/g, "-")
+    .replace(/\s+/g, "-");
+  const pieces = clean.split(/-+/).filter(Boolean);
+  if (!pieces.length) return [];
+  const slugs = new Set();
+  for (let i = 0; i < pieces.length; i++) {
+    const slice = pieces.slice(i).join(" ");
+    const s = slug(slice);
+    if (s) slugs.add(s);
+  }
+  return Array.from(slugs).sort((a, b) => b.length - a.length);
+}
+
+function assignValueBySlug(map, slugs, value) {
+  if (!Array.isArray(slugs) || !slugs.length || value == null) return;
+  for (const s of slugs) {
+    if (!s) continue;
+    map.set(s, value);
+  }
+}
+
+function pickValueBySlug(map, slugCandidates) {
+  if (!map || !slugCandidates?.length) return null;
+  for (const s of slugCandidates) {
+    if (map.has(s)) return map.get(s);
+  }
+  return null;
+}
+
 const to255 = (x) => Math.round((x ?? 0) * 255);
 const hex2 = (v) => v.toString(16).padStart(2, "0");
 
+const clamp01 = (n) => Math.max(0, Math.min(1, typeof n === "number" ? n : 0));
+
 const rgbaOrHex = (color, alphaOverride) => {
   if (!color) return null;
-  const a =
+  const a = clamp01(
     typeof alphaOverride === "number"
       ? alphaOverride
       : typeof color.a === "number"
       ? color.a
-      : 1;
+      : 1
+  );
   const r = to255(color.r);
   const g = to255(color.g);
   const b = to255(color.b);
@@ -84,6 +157,31 @@ const rgbaOrHex = (color, alphaOverride) => {
 const px = (n) => `${Math.round(n || 0)}px`;
 const wrapRem = (pxVal, isDesktop) =>
   isDesktop ? `#{remD(${pxVal})}` : `#{rem(${pxVal})}`;
+
+const formatUnitless = (num) => {
+  if (typeof num !== "number" || !Number.isFinite(num)) return null;
+  const fixed = Number(num.toFixed(3));
+  return `${fixed}`.replace(/\.0+$/, "").replace(/(\.\d*?[1-9])0+$/, "$1");
+};
+
+function formatLineHeight(style, isDesktop) {
+  if (!style) return null;
+  if (typeof style.lineHeightPx === "number" && style.lineHeightPx > 0) {
+    return wrapRem(px(style.lineHeightPx), isDesktop);
+  }
+  const percent =
+    typeof style.lineHeightPercentFontSize === "number"
+      ? style.lineHeightPercentFontSize
+      : typeof style.lineHeightPercentFontSize === "string"
+      ? parseFloat(style.lineHeightPercentFontSize)
+      : null;
+  if (percent && Number.isFinite(percent)) {
+    const ratio = percent / 100;
+    const formatted = formatUnitless(ratio);
+    if (formatted) return formatted;
+  }
+  return null;
+}
 
 function extractFileAndNode(url) {
   const fileMatch = url.match(/(?:file|design)\/([a-zA-Z0-9]+)\//);
@@ -107,13 +205,36 @@ async function figmaGET(url) {
 }
 
 async function fetchFrame(fileId, nodeId) {
-  const url = `https://api.figma.com/v1/files/${fileId}/nodes?ids=${encodeURIComponent(
-    nodeId
-  )}`;
-  const data = await figmaGET(url);
-  const doc = data?.nodes?.[nodeId]?.document;
+  const nodes = await fetchNodesById(fileId, [nodeId]);
+  const doc = nodes.get(nodeId);
   if (!doc) throw new Error("Не знайдено документ фрейму.");
   return doc;
+}
+
+async function fetchNodesById(fileId, nodeIds = []) {
+  const uniqueIds = Array.from(new Set(nodeIds.filter(Boolean)));
+  const result = new Map();
+  if (!uniqueIds.length) return result;
+  const chunkSize = 45;
+  for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+    const chunk = uniqueIds.slice(i, i + chunkSize);
+    const url = `https://api.figma.com/v1/files/${fileId}/nodes?ids=${encodeURIComponent(
+      chunk.join(",")
+    )}`;
+    const data = await figmaGET(url);
+    const nodeMap = data?.nodes || {};
+    for (const id of chunk) {
+      const doc = nodeMap?.[id]?.document;
+      if (doc) result.set(id, doc);
+    }
+  }
+  return result;
+}
+
+async function fetchFileStyles(fileId) {
+  const url = `https://api.figma.com/v1/files/${fileId}/styles`;
+  const data = await figmaGET(url);
+  return Array.isArray(data?.meta?.styles) ? data.meta.styles : [];
 }
 
 // ---------- FRAME TRAVERSE ----------
@@ -149,34 +270,224 @@ function guessWeightFromName(name) {
   return 400;
 }
 
+function createTraversalAccumulator() {
+  return {
+    colorsBySlug: new Map(),
+    fontSizeBySlug: new Map(),
+    lineHeightBySlug: new Map(),
+    shadowsBySlug: new Map(),
+    fonts: new Set(),
+    iconNodes: [],
+  };
+}
+
+function emptyStyleTokens() {
+  return {
+    colorsBySlug: new Map(),
+    fontSizeBySlug: new Map(),
+    lineHeightBySlug: new Map(),
+    shadowsBySlug: new Map(),
+  };
+}
+
+function mergeSlugMaps(target, source) {
+  if (!target || !source) return;
+  for (const [slugKey, val] of source) {
+    target.set(slugKey, val);
+  }
+}
+
+function paintToColorString(paint) {
+  if (!paint || paint.visible === false) return null;
+  const paintOpacity = clamp01(typeof paint.opacity === "number" ? paint.opacity : 1);
+  if (paint.type === "SOLID" && paint.color) {
+    const alpha = composeAlpha(1, paintOpacity, typeof paint.color.a === "number" ? paint.color.a : 1);
+    return rgbaOrHex(paint.color, alpha);
+  }
+  if (
+    paint.type &&
+    paint.type.startsWith("GRADIENT") &&
+    Array.isArray(paint.gradientStops)
+  ) {
+    const firstStop = paint.gradientStops[0];
+    if (firstStop?.color) {
+      const alpha = composeAlpha(
+        1,
+        paintOpacity,
+        typeof firstStop.color.a === "number" ? firstStop.color.a : 1
+      );
+      return rgbaOrHex(firstStop.color, alpha);
+    }
+  }
+  return null;
+}
+
+function extractColorFromStyleNode(node) {
+  if (Array.isArray(node?.fills)) {
+    for (const paint of node.fills) {
+      const val = paintToColorString(paint);
+      if (val) return val;
+    }
+  }
+  if (Array.isArray(node?.strokes)) {
+    for (const paint of node.strokes) {
+      const val = paintToColorString(paint);
+      if (val) return val;
+    }
+  }
+  return null;
+}
+
+function extractShadowFromStyleNode(node) {
+  if (!Array.isArray(node?.effects)) return null;
+  const parts = [];
+  for (const e of node.effects) {
+    if (!e || e.visible === false) continue;
+    if (e.type !== "DROP_SHADOW" && e.type !== "INNER_SHADOW") continue;
+    const offX = px(e.offset?.x ?? 0);
+    const offY = px(e.offset?.y ?? 0);
+    const blur = px(e.radius ?? 0);
+    const alpha = composeAlpha(1, 1, typeof e.color?.a === "number" ? e.color.a : 1);
+    const col = rgbaOrHex(e.color, alpha);
+    parts.push([offX, offY, blur, col].join(" "));
+  }
+  return parts.length ? parts.join(", ") : null;
+}
+
+function extractTypographyFromStyleNode(node, slugHints, target) {
+  if (!node?.style) return;
+  const { fontSize } = node.style;
+  const hasFontSize = typeof fontSize === "number" && fontSize > 0;
+  const pathHint = (node.name || "").toLowerCase();
+  const isDesktop = pathHint.includes("desktop") || (hasFontSize && fontSize >= 20);
+  if (hasFontSize) {
+    const sizePx = px(fontSize);
+    assignValueBySlug(target.fontSizeBySlug, slugHints, wrapRem(sizePx, isDesktop));
+  }
+  const lineHeight = formatLineHeight(node.style, isDesktop);
+  if (lineHeight)
+    assignValueBySlug(target.lineHeightBySlug, slugHints, lineHeight);
+}
+
+async function collectStyleTokens(fileId) {
+  const tokens = emptyStyleTokens();
+  const styles = await fetchFileStyles(fileId);
+  if (!styles.length) return tokens;
+  const interesting = styles.filter((s) =>
+    s?.style_type && ["FILL", "TEXT", "EFFECT"].includes(s.style_type)
+  );
+  if (!interesting.length) return tokens;
+  const nodes = await fetchNodesById(
+    fileId,
+    interesting.map((s) => s.node_id)
+  );
+  for (const style of interesting) {
+    const node = nodes.get(style.node_id);
+    if (!node) continue;
+    const pathSegments = (style.name || "")
+      .split("/")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    const slugHints = buildSlugCandidates(pathSegments);
+    if (!slugHints.length) continue;
+    if (style.style_type === "FILL") {
+      const val = extractColorFromStyleNode(node);
+      if (val) assignValueBySlug(tokens.colorsBySlug, slugHints, val);
+      continue;
+    }
+    if (style.style_type === "TEXT") {
+      extractTypographyFromStyleNode(node, slugHints, tokens);
+      continue;
+    }
+    if (style.style_type === "EFFECT") {
+      const val = extractShadowFromStyleNode(node);
+      if (val) assignValueBySlug(tokens.shadowsBySlug, slugHints, val);
+    }
+  }
+  return tokens;
+}
+
 // обхід дерева фрейму, збираємо все одразу
-function traverseFrame(node, acc, ancestryNames = []) {
+function effectiveNodeOpacity(node) {
+  return clamp01(typeof node?.opacity === "number" ? node.opacity : 1);
+}
+
+function composeAlpha(effectiveOpacity, paintOpacity, colorAlpha) {
+  return clamp01(effectiveOpacity * paintOpacity * colorAlpha);
+}
+
+function traverseFrame(node, acc, ancestryNames = [], inheritedOpacity = 1) {
   if (!node || node.visible === false) return;
   const currentNames = node.name ? [...ancestryNames, node.name] : ancestryNames;
   const pathHint = currentNames.join("/").toLowerCase();
+  const nodeOpacity = effectiveNodeOpacity(node);
+  const cumulativeOpacity = clamp01(inheritedOpacity * nodeOpacity);
+  const slugHints = buildSlugCandidates(currentNames);
 
   // КОЛЬОРИ (fills + strokes)
   if (Array.isArray(node.fills)) {
     for (const f of node.fills) {
       if (!f || f.visible === false) continue;
+      const paintOpacity = clamp01(
+        typeof f.opacity === "number" ? f.opacity : 1
+      );
       if (f.type === "SOLID" && f.color) {
-        const val = rgbaOrHex(
-          f.color,
-          typeof f.opacity === "number" ? f.opacity : f.color.a
+        const alpha = composeAlpha(
+          cumulativeOpacity,
+          paintOpacity,
+          typeof f.color.a === "number" ? f.color.a : 1
         );
-        if (val) acc.colors.add(val);
+        const val = rgbaOrHex(f.color, alpha);
+        if (val) assignValueBySlug(acc.colorsBySlug, slugHints, val);
+      }
+      if (
+        f.type &&
+        f.type.startsWith("GRADIENT") &&
+        Array.isArray(f.gradientStops)
+      ) {
+        for (const stop of f.gradientStops) {
+          if (!stop?.color) continue;
+          const alpha = composeAlpha(
+            cumulativeOpacity,
+            paintOpacity,
+            typeof stop.color.a === "number" ? stop.color.a : 1
+          );
+          const val = rgbaOrHex(stop.color, alpha);
+          if (val) assignValueBySlug(acc.colorsBySlug, slugHints, val);
+        }
       }
     }
   }
   if (Array.isArray(node.strokes)) {
     for (const s of node.strokes) {
       if (!s || s.visible === false) continue;
+      const paintOpacity = clamp01(
+        typeof s.opacity === "number" ? s.opacity : 1
+      );
       if (s.type === "SOLID" && s.color) {
-        const val = rgbaOrHex(
-          s.color,
-          typeof s.opacity === "number" ? s.opacity : s.color.a
+        const alpha = composeAlpha(
+          cumulativeOpacity,
+          paintOpacity,
+          typeof s.color.a === "number" ? s.color.a : 1
         );
-        if (val) acc.colors.add(val);
+        const val = rgbaOrHex(s.color, alpha);
+        if (val) assignValueBySlug(acc.colorsBySlug, slugHints, val);
+      }
+      if (
+        s.type &&
+        s.type.startsWith("GRADIENT") &&
+        Array.isArray(s.gradientStops)
+      ) {
+        for (const stop of s.gradientStops) {
+          if (!stop?.color) continue;
+          const alpha = composeAlpha(
+            cumulativeOpacity,
+            paintOpacity,
+            typeof stop.color.a === "number" ? stop.color.a : 1
+          );
+          const val = rgbaOrHex(stop.color, alpha);
+          if (val) assignValueBySlug(acc.colorsBySlug, slugHints, val);
+        }
       }
     }
   }
@@ -184,11 +495,18 @@ function traverseFrame(node, acc, ancestryNames = []) {
   // ТЕКСТ (розміри + шрифти)
   if (node.type === "TEXT" && node.style) {
     const { fontSize, fontFamily, fontWeight, italic } = node.style;
-    if (fontSize) {
+    const hasFontSize = typeof fontSize === "number" && fontSize > 0;
+    const isDesktop = pathHint.includes("desktop") || (hasFontSize && fontSize >= 20);
+    if (hasFontSize) {
       const sizePx = px(fontSize);
-      const isDesktop = pathHint.includes("desktop") || fontSize >= 20;
-      acc.textSizes.add(wrapRem(sizePx, isDesktop));
+      assignValueBySlug(
+        acc.fontSizeBySlug,
+        slugHints,
+        wrapRem(sizePx, isDesktop)
+      );
     }
+    const lineHeight = formatLineHeight(node.style, isDesktop);
+    if (lineHeight) assignValueBySlug(acc.lineHeightBySlug, slugHints, lineHeight);
     if (fontFamily) {
       const weight = Number(fontWeight) || guessWeightFromName(node.name || "");
       const it = italic ? "i" : "n";
@@ -205,10 +523,15 @@ function traverseFrame(node, acc, ancestryNames = []) {
       const offX = px(e.offset?.x ?? 0);
       const offY = px(e.offset?.y ?? 0);
       const blur = px(e.radius ?? 0);
-      const col = rgbaOrHex(e.color, e.color?.a);
+      const effectAlpha = composeAlpha(
+        cumulativeOpacity,
+        1,
+        typeof e.color?.a === "number" ? e.color.a : 1
+      );
+      const col = rgbaOrHex(e.color, effectAlpha);
       parts.push([offX, offY, blur, col].join(" "));
     }
-    if (parts.length) acc.shadows.add(parts.join(", "));
+    if (parts.length) assignValueBySlug(acc.shadowsBySlug, slugHints, parts.join(", "));
   }
 
   // ІКОНКИ (кандидати)
@@ -219,7 +542,8 @@ function traverseFrame(node, acc, ancestryNames = []) {
   }
 
   if (Array.isArray(node.children)) {
-    for (const child of node.children) traverseFrame(child, acc, currentNames);
+    for (const child of node.children)
+      traverseFrame(child, acc, currentNames, cumulativeOpacity);
   }
 }
 
@@ -245,23 +569,35 @@ function parseScssVars(content) {
   return vars;
 }
 
+// Спочатку аналізуємо значення (hex/rgba/rem/тіні), а потім назву, щоб
+// --body-color не став текстовим розміром, а --text-size-mobile не підхоплював
+// палітру. Таким чином класифікація покриває більше кейсів без ручних винятків.
 function classifyVar(name, value) {
-  const n = name.toLowerCase();
-  const v = (value || "").toLowerCase();
+  const n = (name || "").toLowerCase();
+  const v = (value || "").trim().toLowerCase();
   const looksHex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.test(v);
   const looksRgba = /^rgba?\(/.test(v);
-  const looksRemFn = /#\{remd\(/.test(v) || /#\{rem\(/.test(v);
-  const looksShadow =
-    /(rgba?\(.+\)).*\d+px/.test(v) || n.includes("shadow") || n.startsWith("--shadow-");
-  if (looksRemFn || /desktop---|mobile---|headline|caption|body|button/.test(n))
-    return "text";
-  if (looksShadow) return "shadow";
-  if (
-    looksHex ||
-    looksRgba ||
-    /color|greyscale|primary|secondary|support|special/.test(n)
-  )
+  const looksRemFn = /#\{remd?\(/.test(v) || /rem\(/.test(v);
+  const looksShadowValue = /(rgba?|#)[^;]*\d+px[^;]*\d+px/.test(v);
+  const looksPxNumber = /\d+px/.test(v);
+  const looksUnitlessNumber = /^-?\d+(?:\.\d+)?$/.test(v);
+  const mentionsLineHeight = /line[-_ ]?height|leading|lineheight|\blh\b/.test(n);
+  const looksNormalLine = v === "normal";
+
+  if (looksHex || looksRgba) return "color";
+  if (looksShadowValue) return "shadow";
+  if (mentionsLineHeight || looksNormalLine) return "lineHeight";
+  if (looksUnitlessNumber && mentionsLineHeight) return "lineHeight";
+  if (looksRemFn || (/font|text|headline|caption|body|button|size/.test(n) && looksPxNumber))
+    return "fontSize";
+  if (looksUnitlessNumber && /leading|line/.test(n)) return "lineHeight";
+
+  if (/shadow|elevation|drop/.test(n)) return "shadow";
+  if (/color|greyscale|primary|secondary|support|special|accent|fill|bg|background/.test(n))
     return "color";
+  if (/line[-_ ]?height|leading|lineheight|\blh\b/.test(n)) return "lineHeight";
+  if (/font|text|headline|caption|body|button|size|desktop---|mobile---/.test(n))
+    return "fontSize";
   return null;
 }
 
@@ -661,38 +997,40 @@ async function createZip(outputPath, includePaths) {
 async function actionUpdateScss(scssPath, fileId, nodeId) {
   console.log(chalk.cyan("\n🔧 Оновлення SCSS змінних..."));
   const frame = await fetchFrame(fileId, nodeId);
-  const acc = {
-    colors: new Set(),
-    textSizes: new Set(),
-    shadows: new Set(),
-    fonts: new Set(),
-    iconNodes: [],
-  };
+  const acc = createTraversalAccumulator();
   traverseFrame(frame, acc);
+  const styleTokens = await collectStyleTokens(fileId);
+  mergeSlugMaps(acc.colorsBySlug, styleTokens.colorsBySlug);
+  mergeSlugMaps(acc.fontSizeBySlug, styleTokens.fontSizeBySlug);
+  mergeSlugMaps(acc.lineHeightBySlug, styleTokens.lineHeightBySlug);
+  mergeSlugMaps(acc.shadowsBySlug, styleTokens.shadowsBySlug);
 
-  const colors = [...acc.colors];
-  const texts = [...acc.textSizes];
-  const shadows = [...acc.shadows];
-
-  console.log(chalk.green(`🎨 Кольори: ${colors.length}`));
-  console.log(chalk.green(`🅰️ Тексти: ${texts.length}`));
-  console.log(chalk.green(`🌫️ Тіні: ${shadows.length}`));
+  console.log(chalk.green(`🎨 Кольори: ${acc.colorsBySlug.size}`));
+  console.log(chalk.green(`🅰️ Font-size: ${acc.fontSizeBySlug.size}`));
+  console.log(chalk.green(`📏 Line-height: ${acc.lineHeightBySlug.size}`));
+  console.log(chalk.green(`🌫️ Тіні: ${acc.shadowsBySlug.size}`));
 
   const scssContent = readScss(scssPath);
   const vars = parseScssVars(scssContent);
   const updates = new Map();
 
-  let ci = 0,
-    ti = 0,
-    si = 0;
   for (const v of vars) {
     const type = classifyVar(v.varName, v.value);
-    if (type === "color" && colors.length)
-      updates.set(v.varName, colors[ci++ % colors.length]);
-    if (type === "text" && texts.length)
-      updates.set(v.varName, texts[ti++ % texts.length]);
-    if (type === "shadow" && shadows.length)
-      updates.set(v.varName, shadows[si++ % shadows.length]);
+    const slugCandidates = buildVarSlugCandidates(v.varName);
+    if (!slugCandidates.length) continue;
+    if (type === "color") {
+      const val = pickValueBySlug(acc.colorsBySlug, slugCandidates);
+      if (val) updates.set(v.varName, val);
+    } else if (type === "fontSize") {
+      const val = pickValueBySlug(acc.fontSizeBySlug, slugCandidates);
+      if (val) updates.set(v.varName, val);
+    } else if (type === "lineHeight") {
+      const val = pickValueBySlug(acc.lineHeightBySlug, slugCandidates);
+      if (val) updates.set(v.varName, val);
+    } else if (type === "shadow") {
+      const val = pickValueBySlug(acc.shadowsBySlug, slugCandidates);
+      if (val) updates.set(v.varName, val);
+    }
   }
 
   const bak = backupScss(scssPath);
@@ -714,14 +1052,7 @@ async function actionFonts(fileId, nodeId) {
   console.log(chalk.cyan("\n🔧 Завантаження шрифтів..."));
   const frame = await fetchFrame(fileId, nodeId);
 
-  const accFonts = {
-    colors: new Set(),
-    textSizes: new Set(),
-    shadows: new Set(),
-    fonts: new Set(),
-    iconNodes: [],
-  };
-
+  const accFonts = createTraversalAccumulator();
   traverseFrame(frame, accFonts);
 
   const fontKeys = [...accFonts.fonts];
@@ -850,13 +1181,7 @@ async function actionFonts(fileId, nodeId) {
 async function actionIcons(fileId, nodeId) {
   console.log(chalk.cyan("\n🔧 Експорт іконок..."));
   const frame = await fetchFrame(fileId, nodeId);
-  const acc = {
-    colors: new Set(),
-    textSizes: new Set(),
-    shadows: new Set(),
-    fonts: new Set(),
-    iconNodes: [],
-  };
+  const acc = createTraversalAccumulator();
   traverseFrame(frame, acc);
   const iconsOut = path.join("dist", "assets", "icons");
   const res = await exportIcons(fileId, acc.iconNodes, iconsOut);
@@ -911,7 +1236,8 @@ async function main() {
 
   let summary = {
     colors: 0,
-    texts: 0,
+    fontSizes: 0,
+    lineHeights: 0,
     shadows: 0,
     iconsOk: 0,
     iconsTotal: 0,
@@ -922,9 +1248,10 @@ async function main() {
   // SCSS
   if (action === "scss" || action === "all") {
     const { acc } = await actionUpdateScss(scssPath, fileId, nodeId);
-    summary.colors = acc.colors.size;
-    summary.texts = acc.textSizes.size;
-    summary.shadows = acc.shadows.size;
+    summary.colors = acc.colorsBySlug.size;
+    summary.fontSizes = acc.fontSizeBySlug.size;
+    summary.lineHeights = acc.lineHeightBySlug.size;
+    summary.shadows = acc.shadowsBySlug.size;
   }
 
   // Fonts
@@ -947,10 +1274,16 @@ async function main() {
   console.log(chalk.green(`\n📦 ZIP оновлено: ${zipPath}`));
 
   console.log(chalk.cyan("\n────────────── РЕЗЮМЕ ──────────────"));
-  if (summary.colors || summary.texts || summary.shadows) {
+  if (
+    summary.colors ||
+    summary.fontSizes ||
+    summary.lineHeights ||
+    summary.shadows
+  ) {
     console.log(`🎨 Кольори: ${summary.colors}`);
-    console.log(`🅰️ Тексти:  ${summary.texts}`);
-    console.log(`🌫️ Тіні:    ${summary.shadows}`);
+    console.log(`🅰️ Font-size:  ${summary.fontSizes}`);
+    console.log(`📏 Line-height: ${summary.lineHeights}`);
+    console.log(`🌫️ Тіні:       ${summary.shadows}`);
   }
   if (summary.iconsTotal) {
     console.log(
