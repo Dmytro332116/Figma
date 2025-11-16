@@ -145,6 +145,13 @@ function buildSlugCandidates(names = []) {
   );
   const segments = meaningful.length ? meaningful : normalized;
   return collectSlugVariants(segments);
+  const slugs = new Set();
+  for (let i = 0; i < segments.length; i++) {
+    const slice = segments.slice(i).join(" ");
+    const s = slug(slice);
+    if (s) slugs.add(s);
+  }
+  return Array.from(slugs).sort((a, b) => b.length - a.length);
 }
 
 function buildVarSlugCandidates(varName = "") {
@@ -155,6 +162,13 @@ function buildVarSlugCandidates(varName = "") {
   const pieces = clean.split(/-+/).filter(Boolean);
   if (!pieces.length) return [];
   return collectSlugVariants(pieces);
+  const slugs = new Set();
+  for (let i = 0; i < pieces.length; i++) {
+    const slice = pieces.slice(i).join(" ");
+    const s = slug(slice);
+    if (s) slugs.add(s);
+  }
+  return Array.from(slugs).sort((a, b) => b.length - a.length);
 }
 
 function assignValueBySlug(map, slugs, value) {
@@ -845,6 +859,7 @@ function classifyVar(name, value) {
   const looksRgba = /^rgba?\(/.test(v);
   const looksRemFn = /#\{remd?\(/.test(v) || /rem\(/.test(v);
   const looksShadowValue = SHADOW_VALUE_RE.test(v);
+  const looksShadowValue = /(rgba?|#)[^;]*\d+px[^;]*\d+px/.test(v);
   const looksPxNumber = /\d+px/.test(v);
   const looksUnitlessNumber = /^-?\d+(?:\.\d+)?$/.test(v);
   const mentionsLineHeight = /line[-_ ]?height|leading|lineheight|\blh\b/.test(n);
