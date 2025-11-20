@@ -1,8 +1,8 @@
-// index.js v5.1 — Figma → SCSS + Icons + Fonts + ZIP
+// index.js v6 — Figma → SCSS + Icons + Fonts + ZIP
 // --------------------------------------------------
 // ✅ Меню дій (SCSS / Fonts / Icons / All)
 // ✅ Оновлює тільки існуючі змінні в SCSS (кольори / текст / тіні)
-// ✅ Експорт іконок (SVG → PNG fallback) з прогресом
+// ✅ Експорт іконок (SVG only) з прогресом
 // ✅ Завантаження шрифтів через Webfonts Helper API (woff2)
 // ✅ Розкладання шрифтів по папках Regular / Bold / Black / …
 // ✅ Імена файлів: Rubik-Bold.woff2, Cuprum-Regular.woff2, ...
@@ -16,6 +16,7 @@ import inquirer from "inquirer";
 import dotenv from "dotenv";
 import chalk from "chalk";
 import JSZip from "jszip";
+import { TOKENS_MAP } from "./tokens-map.js";
 
 dotenv.config();
 
@@ -62,136 +63,9 @@ const slug = (s = "") =>
     .replace(/^-+|-+$/g, "")
     .toLowerCase() || "node";
 
-const SHADOW_VALUE_RE = /(rgba?|#)[^;]*\d+px[^;]*\d+px/;
-
-const GENERIC_NODE_NAMES = new Set([
-  "rectangle",
-  "rect",
-  "frame",
-  "auto layout",
-  "group",
-  "component",
-  "component set",
-  "instance",
-  "vector",
-  "ellipse",
-  "line",
-  "text",
-]);
-
-function normalizePathNames(names = []) {
-  return names
-    .map((n) => (n || "").trim())
-    .filter(Boolean)
-    .map((n) => n.replace(/\s+/g, " "));
-}
-
-function splitSegmentIntoTokens(segment = "") {
-  const trimmed = (segment || "").trim();
-  if (!trimmed) return [];
-  const normalized = trimmed
-    .replace(/[(){}\[\]]/g, " ")
-    .replace(/[._]/g, " ")
-    .replace(/[\u2010-\u2015]/g, " ")
-    .replace(/([a-zA-Z])(\d)/g, "$1 $2")
-    .replace(/(\d)([a-zA-Z])/g, "$1 $2");
-  const tokens = normalized
-    .split(/[^a-zA-Z0-9]+/)
-    .map((t) => t.trim())
-    .filter(Boolean);
-  return tokens.length ? tokens : [trimmed];
-}
-
-function collectSlugVariants(segments = []) {
-  const cleaned = segments
-    .map((segment) => (segment || "").trim())
-    .filter(Boolean);
-  if (!cleaned.length) return [];
-
-  const exploded = cleaned.flatMap((seg) => splitSegmentIntoTokens(seg));
-  if (!exploded.length) return [];
-
-  const slugs = new Set();
-  const addSlug = (parts) => {
-    if (!parts?.length) return;
-    const s = slug(parts.filter(Boolean).join(" "));
-    if (s) slugs.add(s);
-  };
-
-  // contiguous slices (усі підпослідовності, не тільки суфікси)
-  for (let start = 0; start < exploded.length; start++) {
-    for (let end = start + 1; end <= exploded.length; end++) {
-      addSlug(exploded.slice(start, end));
-    }
-  }
-
-  // pairwise combos (first + last, first + any child, etc.)
-  if (exploded.length >= 2) {
-    for (let i = 0; i < exploded.length - 1; i++) {
-      for (let j = i + 1; j < exploded.length; j++) {
-        addSlug([exploded[i], exploded[j]]);
-      }
-    }
-  }
-
-  return Array.from(slugs).sort((a, b) => b.length - a.length);
-}
-
-function buildSlugCandidates(names = []) {
-  const normalized = normalizePathNames(names);
-  if (!normalized.length) return [];
-  const meaningful = normalized.filter(
-    (name) => !GENERIC_NODE_NAMES.has(name.toLowerCase())
-  );
-  const segments = meaningful.length ? meaningful : normalized;
-  return collectSlugVariants(segments);
-  const slugs = new Set();
-  for (let i = 0; i < segments.length; i++) {
-    const slice = segments.slice(i).join(" ");
-    const s = slug(slice);
-    if (s) slugs.add(s);
-  }
-  return Array.from(slugs).sort((a, b) => b.length - a.length);
-}
-
-function buildVarSlugCandidates(varName = "") {
-  const clean = (varName || "")
-    .replace(/^--/, "")
-    .replace(/_/g, "-")
-    .replace(/\s+/g, "-");
-  const pieces = clean.split(/-+/).filter(Boolean);
-  if (!pieces.length) return [];
-  return collectSlugVariants(pieces);
-  const slugs = new Set();
-  for (let i = 0; i < pieces.length; i++) {
-    const slice = pieces.slice(i).join(" ");
-    const s = slug(slice);
-    if (s) slugs.add(s);
-  }
-  return Array.from(slugs).sort((a, b) => b.length - a.length);
-}
-
-function assignValueBySlug(map, slugs, value) {
-  if (!Array.isArray(slugs) || !slugs.length || value == null) return;
-  for (const s of slugs) {
-    if (!s) continue;
-    map.set(s, value);
-  }
-}
-
-function pickValueBySlug(map, slugCandidates) {
-  if (!map || !slugCandidates?.length) return null;
-  for (const s of slugCandidates) {
-    if (map.has(s)) return map.get(s);
-  }
-  return null;
-}
-
+const clamp01 = (n) => Math.max(0, Math.min(1, typeof n === "number" ? n : 0));
 const to255 = (x) => Math.round((x ?? 0) * 255);
 const hex2 = (v) => v.toString(16).padStart(2, "0");
-
-const clamp01 = (n) => Math.max(0, Math.min(1, typeof n === "number" ? n : 0));
-
 const rgbaOrHex = (color, alphaOverride) => {
   if (!color) return null;
   const a = clamp01(
@@ -208,93 +82,7 @@ const rgbaOrHex = (color, alphaOverride) => {
     ? `rgba(${r}, ${g}, ${b}, ${Number(a.toFixed(3))})`
     : `#${hex2(r)}${hex2(g)}${hex2(b)}`;
 };
-
-const FONT_SIZE_HINT_RE =
-  /(font|text|headline|title|display|body|caption|paragraph|button|size|desktop---|mobile---)/;
-const LINE_HEIGHT_HINT_RE = /(lineheight|line-height|leading|line|\blh\b)/;
-const DESKTOP_HINT_RE = /(desktop|desk|web|lg|xl|xxl|hd|desktop---)/;
-
-function slugMatches(slugs, regex) {
-  if (!slugs?.length) return false;
-  return slugs.some((s) => regex.test(s));
-}
-
-function inferDesktopFromSlugs(slugs) {
-  return slugMatches(slugs, DESKTOP_HINT_RE);
-}
-
-function coerceNumber(value) {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string") {
-    const parsed = parseFloat(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  if (typeof value === "object" && value !== null) {
-    if (typeof value.value === "number" && Number.isFinite(value.value)) {
-      return value.value;
-    }
-    if (typeof value.v === "number" && Number.isFinite(value.v)) {
-      return value.v;
-    }
-  }
-  return null;
-}
-
-function formatFontSizeNumber(value, slugs) {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
-  const isDesktop = inferDesktopFromSlugs(slugs);
-  return wrapRem(px(value), isDesktop);
-}
-
-function formatLineHeightNumber(value, slugs) {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
-  if (value <= 5) {
-    const formatted = formatUnitless(value);
-    return formatted || null;
-  }
-  const isDesktop = inferDesktopFromSlugs(slugs);
-  return wrapRem(px(value), isDesktop);
-}
-
 const px = (n) => `${Math.round(n || 0)}px`;
-const wrapRem = (pxVal, isDesktop) =>
-  isDesktop ? `#{remD(${pxVal})}` : `#{rem(${pxVal})}`;
-
-const formatUnitless = (num) => {
-  if (typeof num !== "number" || !Number.isFinite(num)) return null;
-  const fixed = Number(num.toFixed(3));
-  return `${fixed}`.replace(/\.0+$/, "").replace(/(\.\d*?[1-9])0+$/, "$1");
-};
-
-function formatLineHeight(style, isDesktop) {
-  if (!style) return null;
-  if (typeof style.lineHeightPx === "number" && style.lineHeightPx > 0) {
-    return wrapRem(px(style.lineHeightPx), isDesktop);
-  }
-  const percent =
-    typeof style.lineHeightPercentFontSize === "number"
-      ? style.lineHeightPercentFontSize
-      : typeof style.lineHeightPercentFontSize === "string"
-      ? parseFloat(style.lineHeightPercentFontSize)
-      : null;
-  if (percent && Number.isFinite(percent)) {
-    const ratio = percent / 100;
-    const formatted = formatUnitless(ratio);
-    if (formatted) return formatted;
-  }
-  return null;
-}
-
-function extractFileAndNode(url) {
-  const fileMatch = url.match(/(?:file|design)\/([a-zA-Z0-9]+)\//);
-  const nodeMatch = url.match(/node-id=([0-9:-]+)/);
-  return {
-    fileId: fileMatch ? fileMatch[1] : null,
-    nodeId: nodeMatch
-      ? decodeURIComponent(nodeMatch[1]).replace(/-/g, ":")
-      : null,
-  };
-}
 
 // ---------- FIGMA API ----------
 async function figmaGET(url) {
@@ -304,13 +92,6 @@ async function figmaGET(url) {
     throw new Error(data?.err || data?.message || `HTTP ${res.status}`);
   }
   return data;
-}
-
-async function fetchFrame(fileId, nodeId) {
-  const nodes = await fetchNodesById(fileId, [nodeId]);
-  const doc = nodes.get(nodeId);
-  if (!doc) throw new Error("Не знайдено документ фрейму.");
-  return doc;
 }
 
 async function fetchNodesById(fileId, nodeIds = []) {
@@ -339,12 +120,6 @@ async function fetchFileStyles(fileId) {
   return Array.isArray(data?.meta?.styles) ? data.meta.styles : [];
 }
 
-async function fetchFileDocument(fileId) {
-  const url = `https://api.figma.com/v1/files/${fileId}`;
-  const data = await figmaGET(url);
-  return data?.document || null;
-}
-
 async function fetchVariablePayload(fileId, scope) {
   const url = `https://api.figma.com/v1/files/${fileId}/variables/${scope}`;
   try {
@@ -352,7 +127,12 @@ async function fetchVariablePayload(fileId, scope) {
     return data?.meta || null;
   } catch (err) {
     const msg = (err?.message || "").toLowerCase();
-    if (msg.includes("http 404") || msg.includes("http 403")) {
+    if (
+      msg.includes("http 404") ||
+      msg.includes("http 403") ||
+      msg.includes("scope") ||
+      msg.includes("permission")
+    ) {
       console.warn(
         chalk.gray(
           `⚠️  Variables ${scope} недоступні для цього файлу (${err.message})`
@@ -366,11 +146,7 @@ async function fetchVariablePayload(fileId, scope) {
 
 async function fetchVariablesForFile(fileId) {
   const scopes = ["local", "published"];
-  const aggregated = {
-    variables: [],
-    collections: [],
-    modes: [],
-  };
+  const aggregated = { variables: [], collections: [], modes: [] };
   const seenVariables = new Set();
   const seenCollections = new Set();
   const seenModes = new Set();
@@ -402,134 +178,94 @@ async function fetchVariablesForFile(fileId) {
   return aggregated;
 }
 
-// ---------- FRAME TRAVERSE ----------
-const ICON_NAME_RE =
-  /icon|icn|glyph|logo|arrow|chevron|close|burger|menu|play|pause|cart|search|user|heart|plus|minus|star/i;
-const ICON_TYPES = new Set([
-  "VECTOR",
-  "BOOLEAN_OPERATION",
-  "STAR",
-  "LINE",
-  "ELLIPSE",
-  "POLYGON",
-  "RECTANGLE",
-  "REGULAR_POLYGON",
-  "INSTANCE",
-  "COMPONENT",
-  "COMPONENT_SET",
-  "FRAME",
-  "GROUP",
-]);
-
-function guessWeightFromName(name) {
-  const n = (name || "").toLowerCase();
-  if (/thin/.test(n)) return 100;
-  if (/extralight|ultralight/.test(n)) return 200;
-  if (/light/.test(n)) return 300;
-  if (/regular|book|normal/.test(n)) return 400;
-  if (/medium/.test(n)) return 500;
-  if (/semibold|demibold/.test(n)) return 600;
-  if (/bold/.test(n)) return 700;
-  if (/extrabold|ultrabold/.test(n)) return 800;
-  if (/black|heavy/.test(n)) return 900;
-  return 400;
+async function fetchFrame(fileId, nodeId) {
+  const nodes = await fetchNodesById(fileId, [nodeId]);
+  const doc = nodes.get(nodeId);
+  if (!doc) throw new Error("Не знайдено документ фрейму.");
+  return doc;
 }
 
-function createTraversalAccumulator() {
+function extractFileAndNode(url) {
+  const fileMatch = url.match(/(?:file|design)\/([a-zA-Z0-9]+)\//);
+  const nodeMatch = url.match(/node-id=([0-9:-]+)/);
   return {
-    colorsBySlug: new Map(),
-    fontSizeBySlug: new Map(),
-    lineHeightBySlug: new Map(),
-    shadowsBySlug: new Map(),
-    fonts: new Set(),
-    iconNodes: [],
+    fileId: fileMatch ? fileMatch[1] : null,
+    nodeId: nodeMatch ? decodeURIComponent(nodeMatch[1]).replace(/-/g, ":") : null,
   };
 }
 
-function emptyStyleTokens() {
-  return {
-    colorsBySlug: new Map(),
-    fontSizeBySlug: new Map(),
-    lineHeightBySlug: new Map(),
-    shadowsBySlug: new Map(),
-  };
-}
-
-function mergeSlugMaps(target, source) {
-  if (!target || !source) return;
-  for (const [slugKey, val] of source) {
-    target.set(slugKey, val);
-  }
-}
-
-function paintToColorString(paint) {
-  if (!paint || paint.visible === false) return null;
-  const paintOpacity = clamp01(typeof paint.opacity === "number" ? paint.opacity : 1);
-  if (paint.type === "SOLID" && paint.color) {
-    const alpha = composeAlpha(1, paintOpacity, typeof paint.color.a === "number" ? paint.color.a : 1);
-    return rgbaOrHex(paint.color, alpha);
-  }
-  if (
-    paint.type &&
-    paint.type.startsWith("GRADIENT") &&
-    Array.isArray(paint.gradientStops)
-  ) {
-    const firstStop = paint.gradientStops[0];
-    if (firstStop?.color) {
-      const alpha = composeAlpha(
-        1,
-        paintOpacity,
-        typeof firstStop.color.a === "number" ? firstStop.color.a : 1
-      );
-      return rgbaOrHex(firstStop.color, alpha);
+// ---------- STYLES → SCSS ----------
+function buildFigmaNameToScssMap(tokenMap) {
+  const reverse = new Map();
+  if (!tokenMap || typeof tokenMap !== "object") return reverse;
+  for (const [scssVar, names] of Object.entries(tokenMap)) {
+    if (!scssVar || !Array.isArray(names)) continue;
+    for (const name of names) {
+      const trimmed = (name || "").trim();
+      if (!trimmed || reverse.has(trimmed)) continue;
+      reverse.set(trimmed, scssVar);
     }
   }
-  return null;
+  return reverse;
 }
 
-function extractColorFromFillStyle(node) {
-  if (!Array.isArray(node?.fills)) return null;
-  for (const paint of node.fills) {
-    const val = paintToColorString(paint);
-    if (val) return val;
-  }
-  return null;
+const FIGMA_NAME_TO_SCSS = buildFigmaNameToScssMap(TOKENS_MAP);
+
+function emptyTokenMaps() {
+  return {
+    colors: new Map(),
+    fontSizes: new Map(),
+    lineHeights: new Map(),
+    shadows: new Map(),
+  };
 }
 
-function collectColorsFromDocumentTree(doc, styleIdSet) {
-  const result = new Map();
-  if (!doc || !styleIdSet?.size) return result;
+function composeAlpha(effectiveOpacity, paintOpacity, colorAlpha) {
+  return clamp01(effectiveOpacity * paintOpacity * colorAlpha);
+}
 
-  const visit = (node) => {
-    if (!node || node.visible === false) return;
-    const styleId = node?.styles?.fill;
-    if (styleId && styleIdSet.has(styleId) && !result.has(styleId)) {
-      const val = extractColorFromFillStyle(node);
-      if (val) {
-        result.set(styleId, val);
+function extractColorFromStyleNode(node) {
+  if (!node) return null;
+  const fills = Array.isArray(node.fills) ? node.fills : [];
+  for (const paint of fills) {
+    if (!paint || paint.visible === false) continue;
+    const paintOpacity = clamp01(typeof paint.opacity === "number" ? paint.opacity : 1);
+    if (paint.type === "SOLID" && paint.color) {
+      const alpha = composeAlpha(1, paintOpacity, typeof paint.color.a === "number" ? paint.color.a : 1);
+      return rgbaOrHex(paint.color, alpha);
+    }
+    if (paint.type && paint.type.startsWith("GRADIENT") && Array.isArray(paint.gradientStops)) {
+      const firstStop = paint.gradientStops[0];
+      if (firstStop?.color) {
+        const alpha = composeAlpha(
+          1,
+          paintOpacity,
+          typeof firstStop.color.a === "number" ? firstStop.color.a : 1
+        );
+        return rgbaOrHex(firstStop.color, alpha);
       }
     }
-    if (Array.isArray(node.children)) {
-      for (const child of node.children) visit(child);
-    }
-  };
-
-  visit(doc);
-  return result;
-function extractColorFromStyleNode(node) {
-  if (Array.isArray(node?.fills)) {
-    for (const paint of node.fills) {
-      const val = paintToColorString(paint);
-      if (val) return val;
-    }
-  }
-  if (Array.isArray(node?.strokes)) {
-    for (const paint of node.strokes) {
-      const val = paintToColorString(paint);
-      if (val) return val;
-    }
   }
   return null;
+}
+
+function extractTypographyFromStyleNode(node) {
+  if (!node?.style) return null;
+  const { fontSize, lineHeightPx, lineHeightPercentFontSize } = node.style;
+  const result = {};
+  if (typeof fontSize === "number" && fontSize > 0) {
+    result.fontSize = px(fontSize);
+  }
+  if (typeof lineHeightPx === "number" && lineHeightPx > 0) {
+    result.lineHeight = px(lineHeightPx);
+  } else if (
+    typeof lineHeightPercentFontSize === "number" &&
+    Number.isFinite(lineHeightPercentFontSize)
+  ) {
+    const ratio = lineHeightPercentFontSize / 100;
+    result.lineHeight = `${Number(ratio.toFixed(3)).toString()}`.replace(/\.0+$/, "");
+  }
+  return Object.keys(result).length ? result : null;
 }
 
 function extractShadowFromStyleNode(node) {
@@ -541,110 +277,59 @@ function extractShadowFromStyleNode(node) {
     const offX = px(e.offset?.x ?? 0);
     const offY = px(e.offset?.y ?? 0);
     const blur = px(e.radius ?? 0);
-    const alpha = composeAlpha(1, 1, typeof e.color?.a === "number" ? e.color.a : 1);
-    const col = rgbaOrHex(e.color, alpha);
+    const col = rgbaOrHex(e.color, typeof e.color?.a === "number" ? e.color.a : 1);
     parts.push([offX, offY, blur, col].join(" "));
   }
   return parts.length ? parts.join(", ") : null;
 }
 
-function extractTypographyFromStyleNode(node, slugHints, target) {
-  if (!node?.style) return;
-  const { fontSize } = node.style;
-  const hasFontSize = typeof fontSize === "number" && fontSize > 0;
-  const pathHint = (node.name || "").toLowerCase();
-  const isDesktop = pathHint.includes("desktop") || (hasFontSize && fontSize >= 20);
-  if (hasFontSize) {
-    const sizePx = px(fontSize);
-    assignValueBySlug(target.fontSizeBySlug, slugHints, wrapRem(sizePx, isDesktop));
-  }
-  const lineHeight = formatLineHeight(node.style, isDesktop);
-  if (lineHeight)
-    assignValueBySlug(target.lineHeightBySlug, slugHints, lineHeight);
-}
-
 async function collectStyleTokens(fileId) {
-  const tokens = emptyStyleTokens();
+  const tokens = emptyTokenMaps();
   const styles = await fetchFileStyles(fileId);
   if (!styles.length) return tokens;
-  const interesting = styles.filter((s) =>
-    s?.style_type && ["FILL", "TEXT", "EFFECT"].includes(s.style_type)
-  );
-  if (!interesting.length) return tokens;
-  const slugHintsByStyleId = new Map();
-  for (const style of interesting) {
-  const nodes = await fetchNodesById(
-    fileId,
-    interesting.map((s) => s.node_id)
-  );
-  for (const style of interesting) {
-    const node = nodes.get(style.node_id);
-    if (!node) continue;
-    const pathSegments = (style.name || "")
-      .split("/")
-      .map((p) => p.trim())
-      .filter(Boolean);
-    const slugHints = buildSlugCandidates(pathSegments);
-    if (slugHints.length) {
-      slugHintsByStyleId.set(style.node_id, slugHints);
-    }
-  }
 
-  const colorStyles = interesting.filter((s) => s.style_type === "FILL");
-  if (colorStyles.length) {
-    const doc = await fetchFileDocument(fileId);
-    const styleIdSet = new Set(colorStyles.map((s) => s.node_id));
-    const colorValues = collectColorsFromDocumentTree(doc, styleIdSet);
-    for (const style of colorStyles) {
-      const slugHints = slugHintsByStyleId.get(style.node_id);
-      if (!slugHints?.length) continue;
-      const val = colorValues.get(style.node_id);
-      if (val) assignValueBySlug(tokens.colorsBySlug, slugHints, val);
-    }
-  }
-
-  const detailStyles = interesting.filter((s) =>
-    s.style_type === "TEXT" || s.style_type === "EFFECT"
-  );
-  const nodes = await fetchNodesById(
+  const styleNodes = await fetchNodesById(
     fileId,
-    detailStyles.map((s) => s.node_id)
+    styles.map((s) => s.node_id)
   );
-  for (const style of detailStyles) {
-    const node = nodes.get(style.node_id);
+
+  for (const style of styles) {
+    const scssName = FIGMA_NAME_TO_SCSS.get((style.name || "").trim());
+    if (!scssName) continue;
+    const node = styleNodes.get(style.node_id);
     if (!node) continue;
-    const slugHints = slugHintsByStyleId.get(style.node_id);
-    if (!slugHints?.length) continue;
-    if (!slugHints.length) continue;
+
     if (style.style_type === "FILL") {
       const val = extractColorFromStyleNode(node);
-      if (val) assignValueBySlug(tokens.colorsBySlug, slugHints, val);
+      if (val) tokens.colors.set(scssName, val);
       continue;
     }
     if (style.style_type === "TEXT") {
-      extractTypographyFromStyleNode(node, slugHints, tokens);
+      const typo = extractTypographyFromStyleNode(node);
+      if (typo?.fontSize) tokens.fontSizes.set(scssName, typo.fontSize);
+      if (typo?.lineHeight) tokens.lineHeights.set(scssName, typo.lineHeight);
       continue;
     }
     if (style.style_type === "EFFECT") {
-      const val = extractShadowFromStyleNode(node);
-      if (val) assignValueBySlug(tokens.shadowsBySlug, slugHints, val);
+      const shadow = extractShadowFromStyleNode(node);
+      if (shadow) tokens.shadows.set(scssName, shadow);
     }
   }
+
   return tokens;
 }
 
-function chooseVariableModeId(variable, collectionMap) {
+function chooseVariableModeId(variable, collections) {
   const values = variable?.valuesByMode;
   if (!values || !Object.keys(values).length) return null;
-  const collection = collectionMap.get(variable?.variableCollectionId);
+  const collection = collections.get(variable?.variableCollectionId);
   const preferred = collection?.defaultModeId;
   if (preferred && values[preferred]) return preferred;
   return Object.keys(values)[0];
 }
 
 function resolveVariableAlias(variableMap, value, modeId, depth = 0) {
-  if (!value) return null;
-  if (depth > 50) return null;
+  if (!value || depth > 50) return null;
   if (value.type === "VARIABLE_ALIAS" && value.id) {
     const target = variableMap.get(value.id);
     if (!target) return null;
@@ -686,8 +371,17 @@ function normalizeVariableColorValue(entry) {
   return null;
 }
 
+function tokenTypeFromName(scssName) {
+  const n = (scssName || "").toLowerCase();
+  if (n.includes("line-height") || n.includes("line_height")) return "lineHeights";
+  if (n.includes("shadow")) return "shadows";
+  if (n.includes("font") || n.includes("text") || n.includes("headline"))
+    return "fontSizes";
+  return "colors";
+}
+
 async function collectVariableTokens(fileId) {
-  const tokens = emptyStyleTokens();
+  const tokens = emptyTokenMaps();
   const meta = await fetchVariablesForFile(fileId);
   if (!meta?.variables?.length) return tokens;
 
@@ -703,12 +397,8 @@ async function collectVariableTokens(fileId) {
 
   for (const variable of meta.variables) {
     if (!variable) continue;
-    const segments = (variable.name || "")
-      .split("/")
-      .map((p) => p.trim())
-      .filter(Boolean);
-    const slugHints = buildSlugCandidates(segments);
-    if (!slugHints.length) continue;
+    const scssName = FIGMA_NAME_TO_SCSS.get((variable.name || "").trim());
+    if (!scssName) continue;
     const modeId = chooseVariableModeId(variable, collectionMap);
     if (!modeId) continue;
     const rawValue = resolveVariableAlias(
@@ -721,32 +411,28 @@ async function collectVariableTokens(fileId) {
       const colorValue = normalizeVariableColorValue(rawValue);
       if (!colorValue) continue;
       const formatted = rgbaOrHex(colorValue, colorValue.a);
-      if (formatted) assignValueBySlug(tokens.colorsBySlug, slugHints, formatted);
+      if (formatted) tokens.colors.set(scssName, formatted);
       continue;
     }
 
     if (variable.resolvedType === "FLOAT") {
-      const numeric = coerceNumber(rawValue);
+      const numeric =
+        typeof rawValue === "number"
+          ? rawValue
+          : typeof rawValue?.value === "number"
+          ? rawValue.value
+          : null;
       if (numeric == null) continue;
-      const wantsLineHeight = slugMatches(slugHints, LINE_HEIGHT_HINT_RE);
-      const wantsFontSize = slugMatches(slugHints, FONT_SIZE_HINT_RE);
-      if (wantsFontSize) {
-        const formatted = formatFontSizeNumber(numeric, slugHints);
-        if (formatted) assignValueBySlug(tokens.fontSizeBySlug, slugHints, formatted);
-        continue;
-      }
-      if (wantsLineHeight) {
-        const formatted = formatLineHeightNumber(numeric, slugHints);
-        if (formatted)
-          assignValueBySlug(tokens.lineHeightBySlug, slugHints, formatted);
-      }
+      const key = tokenTypeFromName(scssName);
+      if (key === "lineHeights") tokens.lineHeights.set(scssName, px(numeric));
+      else tokens.fontSizes.set(scssName, px(numeric));
       continue;
     }
 
     if (variable.resolvedType === "STRING") {
-      const str = typeof rawValue === "string" ? rawValue.trim() : null;
-      if (str && SHADOW_VALUE_RE.test(str)) {
-        assignValueBySlug(tokens.shadowsBySlug, slugHints, str);
+      if (tokenTypeFromName(scssName) === "shadows") {
+        const str = typeof rawValue === "string" ? rawValue.trim() : null;
+        if (str) tokens.shadows.set(scssName, str);
       }
     }
   }
@@ -754,106 +440,56 @@ async function collectVariableTokens(fileId) {
   return tokens;
 }
 
-// обхід дерева фрейму, збираємо все одразу
-function effectiveNodeOpacity(node) {
-  return clamp01(typeof node?.opacity === "number" ? node.opacity : 1);
+function mergeTokenMaps(base, extra) {
+  const out = emptyTokenMaps();
+  for (const [k, v] of base.colors) out.colors.set(k, v);
+  for (const [k, v] of base.fontSizes) out.fontSizes.set(k, v);
+  for (const [k, v] of base.lineHeights) out.lineHeights.set(k, v);
+  for (const [k, v] of base.shadows) out.shadows.set(k, v);
+  for (const [k, v] of extra.colors) if (!out.colors.has(k)) out.colors.set(k, v);
+  for (const [k, v] of extra.fontSizes)
+    if (!out.fontSizes.has(k)) out.fontSizes.set(k, v);
+  for (const [k, v] of extra.lineHeights)
+    if (!out.lineHeights.has(k)) out.lineHeights.set(k, v);
+  for (const [k, v] of extra.shadows) if (!out.shadows.has(k)) out.shadows.set(k, v);
+  return out;
 }
 
-function composeAlpha(effectiveOpacity, paintOpacity, colorAlpha) {
-  return clamp01(effectiveOpacity * paintOpacity * colorAlpha);
+// ---------- FRAME TRAVERSE (fonts + icons) ----------
+const ICON_TYPES = new Set(["VECTOR", "INSTANCE", "COMPONENT"]);
+
+function guessWeightFromName(name) {
+  const n = (name || "").toLowerCase();
+  if (/thin/.test(n)) return 100;
+  if (/extralight|ultralight/.test(n)) return 200;
+  if (/light/.test(n)) return 300;
+  if (/regular|book|normal/.test(n)) return 400;
+  if (/medium/.test(n)) return 500;
+  if (/semibold|demibold/.test(n)) return 600;
+  if (/bold/.test(n)) return 700;
+  if (/extrabold|ultrabold/.test(n)) return 800;
+  if (/black|heavy/.test(n)) return 900;
+  return 400;
 }
 
-function traverseFrame(node, acc, ancestryNames = [], inheritedOpacity = 1) {
+function createTraversalAccumulator() {
+  return {
+    fonts: new Set(),
+    iconNodes: [],
+  };
+}
+
+const isIconNode = (node) =>
+  (node.type === "VECTOR" || node.type === "COMPONENT" || node.type === "INSTANCE") &&
+  node.width <= 32 &&
+  node.height <= 32;
+
+function traverseFrame(node, acc, ancestryNames = []) {
   if (!node || node.visible === false) return;
   const currentNames = node.name ? [...ancestryNames, node.name] : ancestryNames;
-  const pathHint = currentNames.join("/").toLowerCase();
-  const nodeOpacity = effectiveNodeOpacity(node);
-  const cumulativeOpacity = clamp01(inheritedOpacity * nodeOpacity);
-  const slugHints = buildSlugCandidates(currentNames);
 
-  // КОЛЬОРИ (fills + strokes)
-  if (Array.isArray(node.fills)) {
-    for (const f of node.fills) {
-      if (!f || f.visible === false) continue;
-      const paintOpacity = clamp01(
-        typeof f.opacity === "number" ? f.opacity : 1
-      );
-      if (f.type === "SOLID" && f.color) {
-        const alpha = composeAlpha(
-          cumulativeOpacity,
-          paintOpacity,
-          typeof f.color.a === "number" ? f.color.a : 1
-        );
-        const val = rgbaOrHex(f.color, alpha);
-        if (val) assignValueBySlug(acc.colorsBySlug, slugHints, val);
-      }
-      if (
-        f.type &&
-        f.type.startsWith("GRADIENT") &&
-        Array.isArray(f.gradientStops)
-      ) {
-        for (const stop of f.gradientStops) {
-          if (!stop?.color) continue;
-          const alpha = composeAlpha(
-            cumulativeOpacity,
-            paintOpacity,
-            typeof stop.color.a === "number" ? stop.color.a : 1
-          );
-          const val = rgbaOrHex(stop.color, alpha);
-          if (val) assignValueBySlug(acc.colorsBySlug, slugHints, val);
-        }
-      }
-    }
-  }
-  if (Array.isArray(node.strokes)) {
-    for (const s of node.strokes) {
-      if (!s || s.visible === false) continue;
-      const paintOpacity = clamp01(
-        typeof s.opacity === "number" ? s.opacity : 1
-      );
-      if (s.type === "SOLID" && s.color) {
-        const alpha = composeAlpha(
-          cumulativeOpacity,
-          paintOpacity,
-          typeof s.color.a === "number" ? s.color.a : 1
-        );
-        const val = rgbaOrHex(s.color, alpha);
-        if (val) assignValueBySlug(acc.colorsBySlug, slugHints, val);
-      }
-      if (
-        s.type &&
-        s.type.startsWith("GRADIENT") &&
-        Array.isArray(s.gradientStops)
-      ) {
-        for (const stop of s.gradientStops) {
-          if (!stop?.color) continue;
-          const alpha = composeAlpha(
-            cumulativeOpacity,
-            paintOpacity,
-            typeof stop.color.a === "number" ? stop.color.a : 1
-          );
-          const val = rgbaOrHex(stop.color, alpha);
-          if (val) assignValueBySlug(acc.colorsBySlug, slugHints, val);
-        }
-      }
-    }
-  }
-
-  // ТЕКСТ (розміри + шрифти)
   if (node.type === "TEXT" && node.style) {
     const { fontSize, fontFamily, fontWeight, italic } = node.style;
-    const hasFontSize = typeof fontSize === "number" && fontSize > 0;
-    const isDesktop = pathHint.includes("desktop") || (hasFontSize && fontSize >= 20);
-    if (hasFontSize) {
-      const sizePx = px(fontSize);
-      assignValueBySlug(
-        acc.fontSizeBySlug,
-        slugHints,
-        wrapRem(sizePx, isDesktop)
-      );
-    }
-    const lineHeight = formatLineHeight(node.style, isDesktop);
-    if (lineHeight) assignValueBySlug(acc.lineHeightBySlug, slugHints, lineHeight);
     if (fontFamily) {
       const weight = Number(fontWeight) || guessWeightFromName(node.name || "");
       const it = italic ? "i" : "n";
@@ -861,36 +497,12 @@ function traverseFrame(node, acc, ancestryNames = [], inheritedOpacity = 1) {
     }
   }
 
-  // ТІНІ
-  if (Array.isArray(node.effects)) {
-    const parts = [];
-    for (const e of node.effects) {
-      if (!e || e.visible === false) continue;
-      if (e.type !== "DROP_SHADOW" && e.type !== "INNER_SHADOW") continue;
-      const offX = px(e.offset?.x ?? 0);
-      const offY = px(e.offset?.y ?? 0);
-      const blur = px(e.radius ?? 0);
-      const effectAlpha = composeAlpha(
-        cumulativeOpacity,
-        1,
-        typeof e.color?.a === "number" ? e.color.a : 1
-      );
-      const col = rgbaOrHex(e.color, effectAlpha);
-      parts.push([offX, offY, blur, col].join(" "));
-    }
-    if (parts.length) assignValueBySlug(acc.shadowsBySlug, slugHints, parts.join(", "));
-  }
-
-  // ІКОНКИ (кандидати)
-  const isIconCandidate =
-    (node.name && ICON_NAME_RE.test(node.name)) || ICON_TYPES.has(node.type);
-  if (isIconCandidate) {
+  if (isIconNode(node)) {
     acc.iconNodes.push({ idPath: node.id, namePath: currentNames });
   }
 
   if (Array.isArray(node.children)) {
-    for (const child of node.children)
-      traverseFrame(child, acc, currentNames, cumulativeOpacity);
+    for (const child of node.children) traverseFrame(child, acc, currentNames);
   }
 }
 
@@ -916,39 +528,6 @@ function parseScssVars(content) {
   return vars;
 }
 
-// Спочатку аналізуємо значення (hex/rgba/rem/тіні), а потім назву, щоб
-// --body-color не став текстовим розміром, а --text-size-mobile не підхоплював
-// палітру. Таким чином класифікація покриває більше кейсів без ручних винятків.
-function classifyVar(name, value) {
-  const n = (name || "").toLowerCase();
-  const v = (value || "").trim().toLowerCase();
-  const looksHex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.test(v);
-  const looksRgba = /^rgba?\(/.test(v);
-  const looksRemFn = /#\{remd?\(/.test(v) || /rem\(/.test(v);
-  const looksShadowValue = SHADOW_VALUE_RE.test(v);
-  const looksShadowValue = /(rgba?|#)[^;]*\d+px[^;]*\d+px/.test(v);
-  const looksPxNumber = /\d+px/.test(v);
-  const looksUnitlessNumber = /^-?\d+(?:\.\d+)?$/.test(v);
-  const mentionsLineHeight = /line[-_ ]?height|leading|lineheight|\blh\b/.test(n);
-  const looksNormalLine = v === "normal";
-
-  if (looksHex || looksRgba) return "color";
-  if (looksShadowValue) return "shadow";
-  if (mentionsLineHeight || looksNormalLine) return "lineHeight";
-  if (looksUnitlessNumber && mentionsLineHeight) return "lineHeight";
-  if (looksRemFn || (/font|text|headline|caption|body|button|size/.test(n) && looksPxNumber))
-    return "fontSize";
-  if (looksUnitlessNumber && /leading|line/.test(n)) return "lineHeight";
-
-  if (/shadow|elevation|drop/.test(n)) return "shadow";
-  if (/color|greyscale|primary|secondary|support|special|accent|fill|bg|background/.test(n))
-    return "color";
-  if (/line[-_ ]?height|leading|lineheight|\blh\b/.test(n)) return "lineHeight";
-  if (/font|text|headline|caption|body|button|size|desktop---|mobile---/.test(n))
-    return "fontSize";
-  return null;
-}
-
 function replaceScss(content, updatesMap) {
   if (!updatesMap.size) return { text: content, changed: 0 };
   let changed = 0;
@@ -963,6 +542,50 @@ function replaceScss(content, updatesMap) {
     }
   );
   return { text: out, changed };
+}
+
+async function updateScssVariables(scssPath, fileId) {
+  const styleTokens = await collectStyleTokens(fileId);
+  const variableTokens = await collectVariableTokens(fileId);
+  const tokens = mergeTokenMaps(styleTokens, variableTokens);
+
+  const scssContent = readScss(scssPath);
+  const vars = parseScssVars(scssContent);
+  const updates = new Map();
+
+  for (const v of vars) {
+    if (tokens.colors.has(v.varName)) {
+      updates.set(v.varName, tokens.colors.get(v.varName));
+      continue;
+    }
+    if (tokens.fontSizes.has(v.varName)) {
+      updates.set(v.varName, tokens.fontSizes.get(v.varName));
+      continue;
+    }
+    if (tokens.lineHeights.has(v.varName)) {
+      updates.set(v.varName, tokens.lineHeights.get(v.varName));
+      continue;
+    }
+    if (tokens.shadows.has(v.varName)) {
+      updates.set(v.varName, tokens.shadows.get(v.varName));
+    }
+  }
+
+  console.log(chalk.green(`🎨 Кольори: ${tokens.colors.size}`));
+  console.log(chalk.green(`🅰️ Font-size: ${tokens.fontSizes.size}`));
+  console.log(chalk.green(`📏 Line-height: ${tokens.lineHeights.size}`));
+  console.log(chalk.green(`🌫️ Тіні: ${tokens.shadows.size}`));
+
+  const bak = backupScss(scssPath);
+  const { text: newScss, changed } = replaceScss(scssContent, updates);
+  if (changed > 0) fs.writeFileSync(scssPath, newScss, "utf8");
+
+  console.log(chalk.gray(`💾 Резервна копія: ${bak}`));
+  console.log(
+    chalk.green(`✅ SCSS ${changed > 0 ? "оновлено" : "без змін"} (${changed} змін)`)
+  );
+
+  return { tokens };
 }
 
 // ---------- ICON EXPORT ----------
@@ -990,7 +613,6 @@ async function exportIcons(fileId, iconNodes, outIconsDir) {
   let processed = 0;
   const total = iconNodes.length;
 
-  // SVG спроба
   for (let i = 0; i < iconNodes.length; i += chunkSize) {
     const chunk = iconNodes.slice(i, i + chunkSize);
     const idsParam = chunk.map((n) => n.idPath).join(",");
@@ -1029,59 +651,6 @@ async function exportIcons(fileId, iconNodes, outIconsDir) {
       process.stdout.write(
         `\r${chalk.cyan("⏳ Експорт іконок")}: ${processed}/${total} (${percent}%)   `
       );
-    }
-  }
-
-  // PNG fallback для тих, що не ОК
-  const needPng = rows.filter((r) => r.status !== "✅");
-  if (needPng.length) {
-    for (let i = 0; i < needPng.length; i += chunkSize) {
-      const sub = needPng.slice(i, i + chunkSize);
-      const ids = iconNodes
-        .filter((n) =>
-          sub.some(
-            (r) =>
-              slug(n.namePath[n.namePath.length - 1] || "icon") === r.name
-          )
-        )
-        .map((n) => n.idPath)
-        .join(",");
-
-      if (!ids) continue;
-
-      const url = `https://api.figma.com/v1/images/${fileId}?ids=${encodeURIComponent(
-        ids
-      )}&format=png&scale=2`;
-      const data = await figmaGET(url);
-      const map = data?.images || {};
-
-      for (const row of sub) {
-        const node = iconNodes.find(
-          (n) =>
-            slug(n.namePath[n.namePath.length - 1] || "icon") === row.name
-        );
-        if (!node) continue;
-        const imgUrl = map[node.idPath];
-        if (imgUrl) {
-          try {
-            const res = await fetch(imgUrl);
-            if (res.ok) {
-              const buf = Buffer.from(await res.arrayBuffer());
-              const filePath = path.join(outIconsDir, `${row.name}.png`);
-              fs.writeFileSync(filePath, buf);
-              row.fmt = "png";
-              row.status = "✅";
-              okCount++;
-            } else {
-              row.fmt = "png";
-              row.status = "⚠️";
-            }
-          } catch {
-            row.fmt = "png";
-            row.status = "⚠️";
-          }
-        }
-      }
     }
   }
 
@@ -1341,66 +910,24 @@ async function createZip(outputPath, includePaths) {
   fs.writeFileSync(outputPath, buf);
 }
 
-// ---------- ACTION: UPDATE SCSS ----------
-async function actionUpdateScss(scssPath, fileId, nodeId) {
+// ---------- ACTIONS ----------
+async function actionUpdateScss(scssPath, fileId) {
   console.log(chalk.cyan("\n🔧 Оновлення SCSS змінних..."));
+  const res = await updateScssVariables(scssPath, fileId);
+  return res;
+}
+
+async function actionIcons(fileId, nodeId) {
+  console.log(chalk.cyan("\n🔧 Експорт іконок..."));
   const frame = await fetchFrame(fileId, nodeId);
   const acc = createTraversalAccumulator();
   traverseFrame(frame, acc);
-  const styleTokens = await collectStyleTokens(fileId);
-  const variableTokens = await collectVariableTokens(fileId);
-  mergeSlugMaps(acc.colorsBySlug, styleTokens.colorsBySlug);
-  mergeSlugMaps(acc.fontSizeBySlug, styleTokens.fontSizeBySlug);
-  mergeSlugMaps(acc.lineHeightBySlug, styleTokens.lineHeightBySlug);
-  mergeSlugMaps(acc.shadowsBySlug, styleTokens.shadowsBySlug);
-  mergeSlugMaps(acc.colorsBySlug, variableTokens.colorsBySlug);
-  mergeSlugMaps(acc.fontSizeBySlug, variableTokens.fontSizeBySlug);
-  mergeSlugMaps(acc.lineHeightBySlug, variableTokens.lineHeightBySlug);
-  mergeSlugMaps(acc.shadowsBySlug, variableTokens.shadowsBySlug);
-
-  console.log(chalk.green(`🎨 Кольори: ${acc.colorsBySlug.size}`));
-  console.log(chalk.green(`🅰️ Font-size: ${acc.fontSizeBySlug.size}`));
-  console.log(chalk.green(`📏 Line-height: ${acc.lineHeightBySlug.size}`));
-  console.log(chalk.green(`🌫️ Тіні: ${acc.shadowsBySlug.size}`));
-
-  const scssContent = readScss(scssPath);
-  const vars = parseScssVars(scssContent);
-  const updates = new Map();
-
-  for (const v of vars) {
-    const type = classifyVar(v.varName, v.value);
-    const slugCandidates = buildVarSlugCandidates(v.varName);
-    if (!slugCandidates.length) continue;
-    if (type === "color") {
-      const val = pickValueBySlug(acc.colorsBySlug, slugCandidates);
-      if (val) updates.set(v.varName, val);
-    } else if (type === "fontSize") {
-      const val = pickValueBySlug(acc.fontSizeBySlug, slugCandidates);
-      if (val) updates.set(v.varName, val);
-    } else if (type === "lineHeight") {
-      const val = pickValueBySlug(acc.lineHeightBySlug, slugCandidates);
-      if (val) updates.set(v.varName, val);
-    } else if (type === "shadow") {
-      const val = pickValueBySlug(acc.shadowsBySlug, slugCandidates);
-      if (val) updates.set(v.varName, val);
-    }
-  }
-
-  const bak = backupScss(scssPath);
-  const { text: newScss, changed } = replaceScss(scssContent, updates);
-  if (changed > 0) fs.writeFileSync(scssPath, newScss, "utf8");
-
-  console.log(chalk.gray(`💾 Резервна копія: ${bak}`));
-  console.log(
-    chalk.green(
-      `✅ SCSS ${changed > 0 ? "оновлено" : "без змін"} (${changed} змін)`
-    )
-  );
-
-  return { frame, acc };
+  const iconsOut = path.join("dist", "assets", "icons");
+  const res = await exportIcons(fileId, acc.iconNodes, iconsOut);
+  printIconTable(res.table);
+  return res;
 }
 
-// ---------- ACTION: FONTS (Webfonts Helper) ----------
 async function actionFonts(fileId, nodeId) {
   console.log(chalk.cyan("\n🔧 Завантаження шрифтів..."));
   const frame = await fetchFrame(fileId, nodeId);
@@ -1458,21 +985,11 @@ async function actionFonts(fileId, nodeId) {
 
     process.stdout.write("\n");
 
-    let result;
-    try {
-      result = await downloadFamilyFromWebfontsHelper(
-        usage.name,
-        usage.variants,
-        outFonts
-      );
-    } catch (e) {
-      result = {
-        count: 0,
-        labels: [],
-        manual: true,
-        message: e.message || "unknown-error",
-      };
-    }
+    const result = await downloadFamilyFromWebfontsHelper(
+      usage.name,
+      usage.variants,
+      outFonts
+    );
 
     if (result.count > 0) {
       downloadedFamilies++;
@@ -1530,16 +1047,8 @@ async function actionFonts(fileId, nodeId) {
   return { ok: downloadedFamilies, manual: manualList.length };
 }
 
-// ---------- ACTION: ICONS ----------
-async function actionIcons(fileId, nodeId) {
-  console.log(chalk.cyan("\n🔧 Експорт іконок..."));
-  const frame = await fetchFrame(fileId, nodeId);
-  const acc = createTraversalAccumulator();
-  traverseFrame(frame, acc);
-  const iconsOut = path.join("dist", "assets", "icons");
-  const res = await exportIcons(fileId, acc.iconNodes, iconsOut);
-  printIconTable(res.table);
-  return res;
+async function exportImages(fileId, nodeId) {
+  // TODO: Implement export of images >100px, scale 2x + original
 }
 
 // ---------- MAIN ----------
@@ -1578,9 +1087,7 @@ async function main() {
 
   const { fileId, nodeId } = extractFileAndNode(figmaUrl);
   if (!fileId || !nodeId) {
-    console.error(
-      chalk.red("❌ Неможливо отримати file_id або node_id з URL Figma")
-    );
+    console.error(chalk.red("❌ Неможливо отримати file_id або node_id з URL Figma"));
     process.exit(1);
   }
 
@@ -1598,50 +1105,39 @@ async function main() {
     fontsManual: 0,
   };
 
-  // SCSS
   if (action === "scss" || action === "all") {
-    const { acc } = await actionUpdateScss(scssPath, fileId, nodeId);
-    summary.colors = acc.colorsBySlug.size;
-    summary.fontSizes = acc.fontSizeBySlug.size;
-    summary.lineHeights = acc.lineHeightBySlug.size;
-    summary.shadows = acc.shadowsBySlug.size;
+    const { tokens } = await actionUpdateScss(scssPath, fileId);
+    summary.colors = tokens.colors.size;
+    summary.fontSizes = tokens.fontSizes.size;
+    summary.lineHeights = tokens.lineHeights.size;
+    summary.shadows = tokens.shadows.size;
   }
 
-  // Fonts
   if (action === "fonts" || action === "all") {
     const fontRes = await actionFonts(fileId, nodeId);
     summary.fontsOk = fontRes.ok;
     summary.fontsManual = fontRes.manual;
   }
 
-  // Icons
   if (action === "icons" || action === "all") {
     const iconRes = await actionIcons(fileId, nodeId);
     summary.iconsOk = iconRes.ok;
     summary.iconsTotal = iconRes.table.length;
   }
 
-  // ZIP
   const zipPath = path.join("dist", "export_Figma.zip");
   await createZip(zipPath, [scssPath, path.join("dist", "assets")]);
   console.log(chalk.green(`\n📦 ZIP оновлено: ${zipPath}`));
 
   console.log(chalk.cyan("\n────────────── РЕЗЮМЕ ──────────────"));
-  if (
-    summary.colors ||
-    summary.fontSizes ||
-    summary.lineHeights ||
-    summary.shadows
-  ) {
+  if (summary.colors || summary.fontSizes || summary.lineHeights || summary.shadows) {
     console.log(`🎨 Кольори: ${summary.colors}`);
     console.log(`🅰️ Font-size:  ${summary.fontSizes}`);
     console.log(`📏 Line-height: ${summary.lineHeights}`);
     console.log(`🌫️ Тіні:       ${summary.shadows}`);
   }
   if (summary.iconsTotal) {
-    console.log(
-      `🖼️ Іконки:  ${summary.iconsOk}/${summary.iconsTotal} (успішно)`
-    );
+    console.log(`🖼️ Іконки:  ${summary.iconsOk}/${summary.iconsTotal} (успішно)`);
   }
   if (summary.fontsOk || summary.fontsManual) {
     console.log(
@@ -1656,4 +1152,3 @@ main().catch((e) => {
   console.error(chalk.red(`❌ Помилка: ${e.message}`));
   process.exit(1);
 });
-
