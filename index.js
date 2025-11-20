@@ -126,7 +126,12 @@ async function fetchVariablePayload(fileId, scope) {
     return data?.meta || null;
   } catch (err) {
     const msg = (err?.message || "").toLowerCase();
-    if (msg.includes("http 404") || msg.includes("http 403")) {
+    if (
+      msg.includes("http 404") ||
+      msg.includes("http 403") ||
+      msg.includes("scope") ||
+      msg.includes("permission")
+    ) {
       console.warn(
         chalk.gray(
           `⚠️  Variables ${scope} недоступні для цього файлу (${err.message})`
