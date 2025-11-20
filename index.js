@@ -183,6 +183,7 @@ async function fetchFrame(fileId, nodeId) {
   const doc = nodes.get(nodeId);
   if (!doc) throw new Error("Не знайдено документ фрейму.");
   return doc;
+
 }
 
 function extractFileAndNode(url) {
@@ -204,6 +205,69 @@ function buildFigmaNameToScssMap(tokenMap) {
       const trimmed = (name || "").trim();
       if (!trimmed || reverse.has(trimmed)) continue;
       reverse.set(trimmed, scssVar);
+=======
+}
+
+function extractFileAndNode(url) {
+  const fileMatch = url.match(/(?:file|design)\/([a-zA-Z0-9]+)\//);
+  const nodeMatch = url.match(/node-id=([0-9:-]+)/);
+  return {
+    fileId: fileMatch ? fileMatch[1] : null,
+    nodeId: nodeMatch ? decodeURIComponent(nodeMatch[1]).replace(/-/g, ":") : null,
+  };
+}
+
+// ---------- STYLES → SCSS ----------
+const STYLE_TO_SCSS = {
+  "Greyscale / 900": "--greyscale--900",
+  "Greyscale / 800": "--greyscale--800",
+  "Greyscale / 700": "--greyscale--700",
+  "Greyscale / 600": "--greyscale--600",
+  "Greyscale / 500": "--greyscale--500",
+  "Greyscale / 400": "--greyscale--400",
+  "Greyscale / 300": "--greyscale--300",
+  "Greyscale / 200": "--greyscale--200",
+  "Greyscale / 100": "--greyscale--100",
+  "Mobile / Headline 1": "--mobile---headline-1",
+  "Mobile / Headline 2": "--mobile---headline-2",
+  "Mobile / Headline 3": "--mobile---headline-3",
+  "Mobile / Body": "--mobile---body",
+};
+
+function emptyTokenMaps() {
+  return {
+    colors: new Map(),
+    fontSizes: new Map(),
+    lineHeights: new Map(),
+    shadows: new Map(),
+  };
+}
+
+function composeAlpha(effectiveOpacity, paintOpacity, colorAlpha) {
+  return clamp01(effectiveOpacity * paintOpacity * colorAlpha);
+}
+
+function extractColorFromStyleNode(node) {
+  if (!node) return null;
+  const fills = Array.isArray(node.fills) ? node.fills : [];
+  for (const paint of fills) {
+    if (!paint || paint.visible === false) continue;
+    const paintOpacity = clamp01(typeof paint.opacity === "number" ? paint.opacity : 1);
+    if (paint.type === "SOLID" && paint.color) {
+      const alpha = composeAlpha(1, paintOpacity, typeof paint.color.a === "number" ? paint.color.a : 1);
+      return rgbaOrHex(paint.color, alpha);
+    }
+    if (paint.type && paint.type.startsWith("GRADIENT") && Array.isArray(paint.gradientStops)) {
+      const firstStop = paint.gradientStops[0];
+      if (firstStop?.color) {
+        const alpha = composeAlpha(
+          1,
+          paintOpacity,
+          typeof firstStop.color.a === "number" ? firstStop.color.a : 1
+        );
+        return rgbaOrHex(firstStop.color, alpha);
+      }
+
     }
   }
   return reverse;
@@ -245,8 +309,25 @@ function extractColorFromStyleNode(node) {
         return rgbaOrHex(firstStop.color, alpha);
       }
     }
+=======
+function extractTypographyFromStyleNode(node) {
+  if (!node?.style) return null;
+  const { fontSize, lineHeightPx, lineHeightPercentFontSize } = node.style;
+  const result = {};
+  if (typeof fontSize === "number" && fontSize > 0) {
+    result.fontSize = px(fontSize);
   }
-  return null;
+  if (typeof lineHeightPx === "number" && lineHeightPx > 0) {
+    result.lineHeight = px(lineHeightPx);
+  } else if (
+    typeof lineHeightPercentFontSize === "number" &&
+    Number.isFinite(lineHeightPercentFontSize)
+  ) {
+    const ratio = lineHeightPercentFontSize / 100;
+    result.lineHeight = `${Number(ratio.toFixed(3)).toString()}`.replace(/\.0+$/, "");
+
+  }
+  return Object.keys(result).length ? result : null;
 }
 
 function extractTypographyFromStyleNode(node) {
@@ -294,7 +375,11 @@ async function collectStyleTokens(fileId) {
   );
 
   for (const style of styles) {
+
     const scssName = FIGMA_NAME_TO_SCSS.get((style.name || "").trim());
+
+    const scssName = STYLE_TO_SCSS[style.name];
+
     if (!scssName) continue;
     const node = styleNodes.get(style.node_id);
     if (!node) continue;
@@ -397,7 +482,11 @@ async function collectVariableTokens(fileId) {
 
   for (const variable of meta.variables) {
     if (!variable) continue;
+
     const scssName = FIGMA_NAME_TO_SCSS.get((variable.name || "").trim());
+
+    const scssName = STYLE_TO_SCSS[variable.name];
+
     if (!scssName) continue;
     const modeId = chooseVariableModeId(variable, collectionMap);
     if (!modeId) continue;
