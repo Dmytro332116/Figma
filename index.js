@@ -120,6 +120,77 @@ async function fetchFileStyles(fileId) {
   return Array.isArray(data?.meta?.styles) ? data.meta.styles : [];
 }
 
+async function fetchFrame(fileId, nodeId) {
+  const nodes = await fetchNodesById(fileId, [nodeId]);
+  const doc = nodes.get(nodeId);
+  if (!doc) throw new Error("Не знайдено документ фрейму.");
+  return doc;
+}
+
+function extractFileAndNode(url) {
+  const fileMatch = url.match(/(?:file|design)\/([a-zA-Z0-9]+)\//);
+  const nodeMatch = url.match(/node-id=([0-9:-]+)/);
+  return {
+    fileId: fileMatch ? fileMatch[1] : null,
+    nodeId: nodeMatch ? decodeURIComponent(nodeMatch[1]).replace(/-/g, ":") : null,
+  };
+}
+
+// ---------- STYLES → SCSS ----------
+function buildFigmaNameToScssMap(tokenMap) {
+  const reverse = new Map();
+  if (!tokenMap || typeof tokenMap !== "object") return reverse;
+  for (const [scssVar, names] of Object.entries(tokenMap)) {
+    if (!scssVar || !Array.isArray(names)) continue;
+    for (const name of names) {
+      const trimmed = (name || "").trim();
+      if (!trimmed || reverse.has(trimmed)) continue;
+      reverse.set(trimmed, scssVar);
+    }
+  }
+  return reverse;
+}
+
+const FIGMA_NAME_TO_SCSS = buildFigmaNameToScssMap(TOKENS_MAP);
+
+function emptyTokenMaps() {
+  return {
+    colors: new Map(),
+    fontSizes: new Map(),
+    lineHeights: new Map(),
+    shadows: new Map(),
+  };
+}
+
+function composeAlpha(effectiveOpacity, paintOpacity, colorAlpha) {
+  return clamp01(effectiveOpacity * paintOpacity * colorAlpha);
+}
+
+function extractColorFromStyleNode(node) {
+  if (!node) return null;
+  const fills = Array.isArray(node.fills) ? node.fills : [];
+  for (const paint of fills) {
+    if (!paint || paint.visible === false) continue;
+    const paintOpacity = clamp01(typeof paint.opacity === "number" ? paint.opacity : 1);
+    if (paint.type === "SOLID" && paint.color) {
+      const alpha = composeAlpha(1, paintOpacity, typeof paint.color.a === "number" ? paint.color.a : 1);
+      return rgbaOrHex(paint.color, alpha);
+    }
+    if (paint.type && paint.type.startsWith("GRADIENT") && Array.isArray(paint.gradientStops)) {
+      const firstStop = paint.gradientStops[0];
+      if (firstStop?.color) {
+        const alpha = composeAlpha(
+          1,
+          paintOpacity,
+          typeof firstStop.color.a === "number" ? firstStop.color.a : 1
+        );
+        return rgbaOrHex(firstStop.color, alpha);
+      }
+    }
+  }
+  return null;
+}
+
 async function fetchVariablePayload(fileId, scope) {
   const url = `https://api.figma.com/v1/files/${fileId}/variables/${scope}`;
   try {
@@ -205,7 +276,7 @@ function buildFigmaNameToScssMap(tokenMap) {
       const trimmed = (name || "").trim();
       if (!trimmed || reverse.has(trimmed)) continue;
       reverse.set(trimmed, scssVar);
-=======
+
 }
 
 function extractFileAndNode(url) {
@@ -309,7 +380,7 @@ function extractColorFromStyleNode(node) {
         return rgbaOrHex(firstStop.color, alpha);
       }
     }
-=======
+
 function extractTypographyFromStyleNode(node) {
   if (!node?.style) return null;
   const { fontSize, lineHeightPx, lineHeightPercentFontSize } = node.style;
@@ -325,6 +396,9 @@ function extractTypographyFromStyleNode(node) {
   ) {
     const ratio = lineHeightPercentFontSize / 100;
     result.lineHeight = `${Number(ratio.toFixed(3)).toString()}`.replace(/\.0+$/, "");
+
+  }
+  return Object.keys(result).length ? result : null;
 
   }
   return Object.keys(result).length ? result : null;
@@ -369,6 +443,15 @@ async function collectStyleTokens(fileId) {
   const styles = await fetchFileStyles(fileId);
   if (!styles.length) return tokens;
 
+
+  const styleNodes = await fetchNodesById(
+    fileId,
+    styles.map((s) => s.node_id)
+  );
+
+  for (const style of styles) {
+    const scssName = FIGMA_NAME_TO_SCSS.get((style.name || "").trim());
+
   const styleNodes = await fetchNodesById(
     fileId,
     styles.map((s) => s.node_id)
@@ -401,6 +484,11 @@ async function collectStyleTokens(fileId) {
     }
   }
 
+  return tokens;
+}
+
+// ---------- FRAME TRAVERSE (fonts + icons) ----------
+const ICON_TYPES = new Set(["VECTOR", "INSTANCE", "COMPONENT"]);
   return tokens;
 }
 
@@ -526,8 +614,32 @@ async function collectVariableTokens(fileId) {
     }
   }
 
-  return tokens;
+function guessWeightFromName(name) {
+  const n = (name || "").toLowerCase();
+  if (/thin/.test(n)) return 100;
+  if (/extralight|ultralight/.test(n)) return 200;
+  if (/light/.test(n)) return 300;
+  if (/regular|book|normal/.test(n)) return 400;
+  if (/medium/.test(n)) return 500;
+  if (/semibold|demibold/.test(n)) return 600;
+  if (/bold/.test(n)) return 700;
+  if (/extrabold|ultrabold/.test(n)) return 800;
+  if (/black|heavy/.test(n)) return 900;
+  return 400;
 }
+
+
+function createTraversalAccumulator() {
+  return {
+    fonts: new Set(),
+    iconNodes: [],
+  };
+}
+
+const isIconNode = (node) =>
+  (node.type === "VECTOR" || node.type === "COMPONENT" || node.type === "INSTANCE") &&
+  node.width <= 32 &&
+  node.height <= 32;
 
 function mergeTokenMaps(base, extra) {
   const out = emptyTokenMaps();
@@ -634,6 +746,8 @@ function replaceScss(content, updatesMap) {
 }
 
 async function updateScssVariables(scssPath, fileId) {
+
+  const tokens = await collectStyleTokens(fileId);
   const styleTokens = await collectStyleTokens(fileId);
   const variableTokens = await collectVariableTokens(fileId);
   const tokens = mergeTokenMaps(styleTokens, variableTokens);
